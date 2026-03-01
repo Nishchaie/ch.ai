@@ -1,0 +1,105 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables
+.env.local
+.env.*.local
+
+# pytest
+.pytest_cache/
+.cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# mypy / type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# Distribution / packaging
+*.whl
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+node_modules/
+dist/
+
+# TypeScript
+*.tsbuildinfo
+frontend/tsconfig.tsbuildinfo
+
+# Vite
+frontend/.vite/
+
+# SQLite (sessions)
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V7
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Worktrees (orchestration)
+.worktrees/
+
+# API keys / secrets
+*.pem
+*.key
+secrets.yaml
+secrets.yml
+
+# Cursor
+.cursor/

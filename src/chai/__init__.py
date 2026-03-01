@@ -1,0 +1,3 @@
+"""ch.ai - AI engineering team harness."""
+
+__version__ = "0.1.0"

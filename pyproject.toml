@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=64.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chai-harness"
+version = "0.1.0"
+description = "AI engineering team harness - orchestrate specialized agents with roles, feedback loops, and self-improvement"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+
+dependencies = [
+    "pydantic>=2.9.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+    "httpx>=0.27.0",
+    "aiosqlite>=0.20.0",
+    "gitpython>=3.1.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "websockets>=12.0",
+    "pyyaml>=6.0.0",
+    "python-dotenv>=1.0.0",
+    "ddgs>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+chai = "chai.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

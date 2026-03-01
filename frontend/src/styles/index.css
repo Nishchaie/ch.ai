@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+/* Base font */
+html, body {
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Light theme design tokens */
+:root {
+  /* Role colors - darker shades for light backgrounds */
+  --role-lead: #d97706;
+  --role-frontend: #0891b2;
+  --role-backend: #16a34a;
+  --role-prompt: #c026d3;
+  --role-researcher: #2563eb;
+  --role-qa: #dc2626;
+  --role-deployment: #ca8a04;
+
+  /* Role bg tints */
+  --role-lead-bg: #fef3c7;
+  --role-frontend-bg: #cffafe;
+  --role-backend-bg: #dcfce7;
+  --role-prompt-bg: #fae8ff;
+  --role-researcher-bg: #dbeafe;
+  --role-qa-bg: #fee2e2;
+  --role-deployment-bg: #fef9c3;
+}
+
+.role-lead { color: var(--role-lead); }
+.role-frontend { color: var(--role-frontend); }
+.role-backend { color: var(--role-backend); }
+.role-prompt { color: var(--role-prompt); }
+.role-researcher { color: var(--role-researcher); }
+.role-qa { color: var(--role-qa); }
+.role-deployment { color: var(--role-deployment); }
+
+/* Activity indicator pulse */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+/* Thinking dots animation */
+@keyframes thinking {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+.thinking-dot {
+  animation: thinking 1.4s ease-in-out infinite;
+}
+.thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* Smooth scroll in chat */
+.chat-scroll {
+  scroll-behavior: smooth;
+}
+
+/* Custom scrollbar - subtle */
+.chat-scroll::-webkit-scrollbar,
+.custom-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.chat-scroll::-webkit-scrollbar-track,
+.custom-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-scroll::-webkit-scrollbar-thumb,
+.custom-scroll::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 99px;
+}
+.chat-scroll::-webkit-scrollbar-thumb:hover,
+.custom-scroll::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* Sidebar scrollbar */
+.sidebar-scroll::-webkit-scrollbar {
+  width: 3px;
+}
+.sidebar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: #374151;
+  border-radius: 99px;
+}
+
+/* Smooth sidebar transition */
+.sidebar-transition {
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Tool call code block */
+.tool-output {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
