@@ -107,6 +107,7 @@ class ClaudeCodeProvider(Provider):
         try:
             proc = subprocess.Popen(
                 args,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -155,6 +156,7 @@ class ClaudeCodeProvider(Provider):
         try:
             proc = subprocess.Popen(
                 args,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

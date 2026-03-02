@@ -291,7 +291,8 @@ def run(prompt: str, provider: Optional[str], model: Optional[str], max_agents: 
     def _on_sigint(signum: int, frame: Any) -> None:
         cancel_event.set()
         cancel_active_providers()
-        ui.console.print("\n[yellow]Cancelling… press Ctrl+C again to force quit.[/yellow]")
+        sys.stderr.write("\nCancelling… press Ctrl+C again to force quit.\n")
+        sys.stderr.flush()
         signal.signal(signal.SIGINT, original_sigint)
 
     signal.signal(signal.SIGINT, _on_sigint)
@@ -685,7 +686,11 @@ def _run_in_repl(
     def _on_sigint(signum: int, frame: Any) -> None:
         cancel_event.set()
         cancel_active_providers()
-        console.print("\n[yellow]Cancelling…[/yellow]")
+        # Avoid console.print() here -- Rich Status spinner holds the
+        # console lock in its animation thread, so acquiring it in the
+        # signal handler would deadlock.
+        sys.stderr.write("\nCancelling…\n")
+        sys.stderr.flush()
         signal.signal(signal.SIGINT, original_sigint)
 
     signal.signal(signal.SIGINT, _on_sigint)
@@ -728,6 +733,9 @@ def _run_in_repl(
             console.print("\n[yellow]Cancelled.[/yellow]")
         else:
             console.print("\n[green]Done.[/green]")
+    except KeyboardInterrupt:
+        cancel_event.set()
+        console.print("\n[yellow]Cancelled.[/yellow]")
     except Exception as e:
         console.print(ui.format_error(str(e)))
     finally:

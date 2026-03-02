@@ -67,13 +67,18 @@ class Harness:
         team = self.create_team(team_config)
         team._cancel_event = cancel_event or threading.Event()
 
-        routing = self._router.classify(prompt)
-        strategy = strategy_override or routing.strategy
-        logger.info("Routing: %s (%s)", strategy.value, routing.reason)
+        if strategy_override:
+            strategy = strategy_override
+            reason = "strategy provided by caller"
+        else:
+            routing = self._router.classify(prompt)
+            strategy = routing.strategy
+            reason = routing.reason
+        logger.info("Routing: %s (%s)", strategy.value, reason)
 
         yield AgentEvent(
             type="info",
-            data={"routing": strategy.value, "reason": routing.reason},
+            data={"routing": strategy.value, "reason": reason},
         )
 
         if strategy == ExecutionStrategy.DIRECT:

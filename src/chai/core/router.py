@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, List, Optional
 
+_DEVNULL = subprocess.DEVNULL
+
 logger = logging.getLogger(__name__)
 
 ROUTER_MODELS = {
@@ -76,6 +78,16 @@ def _parse_routing_json(text: str) -> RoutingResult:
     clean = text.strip()
     if clean.startswith("```"):
         clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+    # The model may prefix its JSON with conversational text; find the first '{'.
+    brace = clean.find("{")
+    if brace > 0:
+        clean = clean[brace:]
+    # Trim any trailing text after the closing brace.
+    last_brace = clean.rfind("}")
+    if last_brace >= 0:
+        clean = clean[: last_brace + 1]
+
     data = json.loads(clean)
     return RoutingResult(
         strategy=ExecutionStrategy(data["strategy"]),
@@ -181,6 +193,7 @@ class ComplexityRouter:
                 "--output-format=text",
                 prompt,
             ],
+            stdin=_DEVNULL,
             capture_output=True,
             text=True,
             timeout=30,
