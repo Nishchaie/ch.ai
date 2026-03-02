@@ -428,6 +428,7 @@ class Team:
             logger.warning("WorktreeManager not available, running in shared workspace")
             return None
 
+        self._ensure_git_repo()
         mgr = WorktreeManager(repo_path=self._project_dir)
         try:
             for task in graph.all_tasks():
@@ -439,6 +440,25 @@ class Team:
             for task in graph.all_tasks():
                 task.worktree_path = None
             return None
+
+    def _ensure_git_repo(self) -> None:
+        """Initialize a git repo in the project directory if one doesn't exist."""
+        import subprocess
+        check = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=self._project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if check.returncode != 0:
+            subprocess.run(
+                ["git", "init"],
+                cwd=self._project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
 
     def _merge_worktree_branches(self, graph: TaskGraph) -> None:
         """Merge completed worktree branches back to the current branch."""

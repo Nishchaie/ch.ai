@@ -51,11 +51,23 @@ class MergeManager:
         """Merge source branch into target. Checkouts target, merges source. Returns success."""
         repo = self.repo
         try:
-            target_ref = repo.heads[target] if target in repo.heads else repo.create_head(target)
+            if target in repo.heads:
+                target_ref = repo.heads[target]
+            else:
+                try:
+                    target_ref = repo.create_head(target)
+                except Exception:
+                    repo.git.checkout(source)
+                    repo.git.checkout("-b", target)
+                    return True
             target_ref.checkout()
             repo.git.merge(source)
             return True
         except GitCommandError:
+            try:
+                repo.git.merge("--abort")
+            except GitCommandError:
+                pass
             return False
 
     def get_diff(self, branch: Optional[str] = None) -> str:

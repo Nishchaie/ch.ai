@@ -21,6 +21,7 @@ class WorktreeManager:
 
     def __init__(self, repo_path: Optional[str] = None) -> None:
         self._repo_path = repo_path or str(Path.cwd())
+        self._repo_ready = False
 
     def _git_root(self) -> Optional[str]:
         result = subprocess.run(
@@ -34,6 +35,27 @@ class WorktreeManager:
             return None
         return result.stdout.strip()
 
+    def _ensure_repo_ready(self, repo_root: str) -> None:
+        """Ensure the repo has at least one commit so worktree branches share a common ancestor."""
+        if self._repo_ready:
+            return
+        head_check = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if head_check.returncode != 0:
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "chore: initial commit"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self._repo_ready = True
+
     def _worktrees_root(self) -> str:
         root = self._git_root() or self._repo_path
         return os.path.join(root, WORKTREES_DIR)
@@ -43,6 +65,7 @@ class WorktreeManager:
         repo_root = self._git_root()
         if not repo_root:
             raise RuntimeError("Worktree requires a git repository")
+        self._ensure_repo_ready(repo_root)
         worktrees_root = os.path.join(repo_root, WORKTREES_DIR)
         os.makedirs(worktrees_root, exist_ok=True)
         safe_id = _sanitize_task_id(task_id)
