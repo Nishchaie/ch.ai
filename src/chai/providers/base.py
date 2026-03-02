@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Union
+from typing import Any, Dict, Generator, List, Optional, Set, Union
+
+_active_providers: Set["Provider"] = set()
+
+
+def cancel_active_providers() -> None:
+    """Kill all active provider subprocesses. Called from signal handlers."""
+    for provider in list(_active_providers):
+        try:
+            provider.cancel()
+        except Exception:
+            pass
 
 
 @dataclass
@@ -82,6 +94,9 @@ class Provider(ABC):
     def make_tool_schema(self, tools: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Convert tool definitions to provider-specific schema format."""
         ...
+
+    def cancel(self) -> None:
+        """Cancel any active work. Subclasses with subprocesses should override."""
 
     def format_tool_result(self, tool_call_id: str, result: str) -> Dict[str, Any]:
         return {

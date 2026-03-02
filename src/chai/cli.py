@@ -234,12 +234,14 @@ def run(prompt: str, provider: Optional[str], model: Optional[str], max_agents: 
     forwarder.connect()
 
     import threading
-    cancel_event = threading.Event()
+    from .providers.base import cancel_active_providers
 
+    cancel_event = threading.Event()
     original_sigint = signal.getsignal(signal.SIGINT)
 
     def _on_sigint(signum: int, frame: Any) -> None:
         cancel_event.set()
+        cancel_active_providers()
         ui.console.print("\n[yellow]Cancelling… press Ctrl+C again to force quit.[/yellow]")
         signal.signal(signal.SIGINT, original_sigint)
 

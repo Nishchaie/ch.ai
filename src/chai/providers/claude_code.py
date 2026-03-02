@@ -9,7 +9,7 @@ import subprocess
 import threading
 from typing import Any, Dict, Generator, List, Optional, Union
 
-from .base import Provider, ProviderResponse, StreamChunk
+from .base import Provider, ProviderResponse, StreamChunk, _active_providers
 
 
 class ClaudeCodeProvider(Provider):
@@ -26,10 +26,24 @@ class ClaudeCodeProvider(Provider):
         self._binary = "claude"
         self._timeout = 600
         self._cwd = cwd
+        self._active_proc: Optional[subprocess.Popen] = None
+        self._cancelled = False
 
     @property
     def manages_own_tools(self) -> bool:
         return True
+
+    def cancel(self) -> None:
+        """Kill the active subprocess immediately."""
+        self._cancelled = True
+        proc = self._active_proc
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
     def _ensure_binary(self) -> None:
         if not shutil.which(self._binary):
@@ -78,6 +92,7 @@ class ClaudeCodeProvider(Provider):
         stream: bool = False,
     ) -> Union[ProviderResponse, Generator[StreamChunk, None, ProviderResponse]]:
         self._ensure_binary()
+        self._cancelled = False
         model = self.model or "claude-sonnet-4-6"
         prompt = self._extract_prompt(messages)
 
@@ -88,31 +103,43 @@ class ClaudeCodeProvider(Provider):
     def _blocking_chat(self, system: str, model: str, prompt: str) -> ProviderResponse:
         args = self._build_args(system, model, prompt, output_format="json")
 
+        _active_providers.add(self)
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 args,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self._timeout,
                 cwd=self._cwd,
                 env={**os.environ},
             )
-        except subprocess.TimeoutExpired as e:
+            self._active_proc = proc
+            stdout, stderr = proc.communicate(timeout=self._timeout)
+        except subprocess.TimeoutExpired:
+            if self._active_proc:
+                self._active_proc.kill()
+                self._active_proc.wait()
             raise TimeoutError(
                 f"Claude Code CLI timed out after {self._timeout} seconds"
-            ) from e
+            )
         except FileNotFoundError as e:
             raise FileNotFoundError(
                 f"Claude Code CLI binary not found: {self._binary}"
             ) from e
+        finally:
+            self._active_proc = None
+            _active_providers.discard(self)
 
-        if result.returncode != 0:
-            stderr = result.stderr.strip() if result.stderr else "Unknown error"
+        if self._cancelled:
+            raise RuntimeError("Cancelled by user")
+
+        if proc.returncode != 0:
+            err = stderr.strip() if stderr else "Unknown error"
             raise RuntimeError(
-                f"Claude Code CLI failed (exit {result.returncode}): {stderr}"
+                f"Claude Code CLI failed (exit {proc.returncode}): {err}"
             )
 
-        stdout = result.stdout.strip()
+        stdout = stdout.strip()
         if not stdout:
             raise RuntimeError("Claude Code CLI produced no output")
 
@@ -138,6 +165,9 @@ class ClaudeCodeProvider(Provider):
             raise FileNotFoundError(
                 f"Claude Code CLI binary not found: {self._binary}"
             ) from e
+
+        self._active_proc = proc
+        _active_providers.add(self)
 
         def _drain_stderr() -> None:
             assert proc.stderr is not None
@@ -176,12 +206,19 @@ class ClaudeCodeProvider(Provider):
                     final_result = data.get("result", "")
 
         finally:
-            try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-            stderr_thread.join(timeout=5)
+            self._active_proc = None
+            _active_providers.discard(self)
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            stderr_thread.join(timeout=2)
+
+        if self._cancelled:
+            return ProviderResponse(text="", stop_reason="cancelled")
 
         if proc.returncode and proc.returncode != 0:
             err = "".join(stderr_lines).strip() or "Unknown error"
