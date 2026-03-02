@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import signal
 import sys
+import threading
+import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -29,17 +32,28 @@ class ApiEventForwarder:
     """Pushes AgentEvents to the API server over WebSocket.
 
     Best-effort: if the server is not running the CLI works normally.
-    Uses the ``websockets`` sync client so it can be called from the
-    synchronous CLI event loop without an asyncio runtime.
+    Runs a background daemon thread that retries the connection with
+    exponential backoff and buffers events while disconnected.
     """
+
+    _MAX_BACKOFF = 8.0
 
     def __init__(self, run_id: str, prompt: str, api_url: str = "ws://127.0.0.1:8000") -> None:
         self._run_id = run_id
         self._prompt = prompt
         self._url = f"{api_url}/api/runs/ingest"
+        self._buffer: deque[dict] = deque(maxlen=50_000)
+        self._closing = threading.Event()
+        self._has_items = threading.Event()
         self._ws: Any = None
+        self._thread: Optional[threading.Thread] = None
 
-    def connect(self) -> bool:
+    def start(self) -> None:
+        """Launch the background forwarding thread."""
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def _try_connect(self) -> bool:
         try:
             from websockets.sync.client import connect
             self._ws = connect(self._url, open_timeout=2)
@@ -53,35 +67,70 @@ class ApiEventForwarder:
             self._ws = None
             return False
 
-    def send_event(self, evt: AgentEvent) -> None:
+    def _flush_buffer(self) -> bool:
+        """Send all buffered messages. Returns False if the connection broke."""
+        while self._buffer and self._ws:
+            msg = self._buffer[0]
+            try:
+                self._ws.send(json.dumps(msg))
+                self._buffer.popleft()
+            except Exception:
+                self._ws = None
+                return False
+        return True
+
+    def _run_loop(self) -> None:
+        backoff = 2.0
+        while not self._closing.is_set():
+            if not self._ws:
+                if self._try_connect():
+                    backoff = 2.0
+                    if not self._flush_buffer():
+                        continue
+                else:
+                    self._closing.wait(timeout=backoff)
+                    backoff = min(backoff * 2, self._MAX_BACKOFF)
+                    continue
+
+            if not self._buffer:
+                self._has_items.wait(timeout=0.25)
+                self._has_items.clear()
+
+            if not self._flush_buffer():
+                continue
+
+        # Shutting down: best-effort flush and send done
         if not self._ws:
-            return
-        try:
-            self._ws.send(json.dumps({
-                "action": "event",
-                "run_id": self._run_id,
-                "event": {
-                    "type": evt.type,
-                    "data": evt.data,
-                    "role": evt.role.value if evt.role else None,
-                    "task_id": evt.task_id,
-                },
-            }))
-        except Exception:
-            self._ws = None
+            self._try_connect()
+        self._flush_buffer()
+        if self._ws:
+            try:
+                self._ws.send(json.dumps({"action": "done", "run_id": self._run_id}))
+                self._ws.close()
+            except Exception:
+                pass
+
+    def _serialize_event(self, evt: AgentEvent) -> dict:
+        return {
+            "action": "event",
+            "run_id": self._run_id,
+            "event": {
+                "type": evt.type,
+                "data": evt.data,
+                "role": evt.role.value if evt.role else None,
+                "task_id": evt.task_id,
+            },
+        }
+
+    def send_event(self, evt: AgentEvent) -> None:
+        self._buffer.append(self._serialize_event(evt))
+        self._has_items.set()
 
     def close(self) -> None:
-        if not self._ws:
-            return
-        try:
-            self._ws.send(json.dumps({
-                "action": "done",
-                "run_id": self._run_id,
-            }))
-            self._ws.close()
-        except Exception:
-            pass
-        self._ws = None
+        self._closing.set()
+        self._has_items.set()
+        if self._thread:
+            self._thread.join(timeout=5)
 
 
 def _handle_incremental_state(evt: "AgentEvent", prompt: str) -> None:
@@ -231,9 +280,8 @@ def run(prompt: str, provider: Optional[str], model: Optional[str], max_agents: 
 
     run_id = str(uuid.uuid4())
     forwarder = ApiEventForwarder(run_id, prompt)
-    forwarder.connect()
+    forwarder.start()
 
-    import threading
     from .providers.base import cancel_active_providers
 
     cancel_event = threading.Event()

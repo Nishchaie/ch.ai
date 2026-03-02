@@ -22,6 +22,7 @@ export interface ChatSession {
   qualitySnapshot?: Record<string, QualityScore>;
   source?: "web" | "cli";
   streaming?: boolean;
+  cliRunId?: string;
 }
 
 interface ChatSessionContextValue {
@@ -36,6 +37,7 @@ interface ChatSessionContextValue {
   updateSessionQuality: (id: string, quality: Record<string, QualityScore>) => void;
   updateSessionSource: (id: string, source: "web" | "cli") => void;
   updateSessionStreaming: (id: string, streaming: boolean) => void;
+  updateSessionCliRunId: (id: string, cliRunId: string) => void;
   deleteSession: (id: string) => void;
   getSession: (id: string) => ChatSession | undefined;
 }
@@ -146,6 +148,12 @@ export function ChatSessionProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
+  const updateSessionCliRunId = useCallback((id: string, cliRunId: string) => {
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, cliRunId } : s))
+    );
+  }, []);
+
   const deleteSession = useCallback(
     (id: string) => {
       setSessions((prev) => prev.filter((s) => s.id !== id));
@@ -178,6 +186,7 @@ export function ChatSessionProvider({ children }: { children: ReactNode }) {
         updateSessionQuality,
         updateSessionSource,
         updateSessionStreaming,
+        updateSessionCliRunId,
         deleteSession,
         getSession,
       }}

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowUp, ChevronDown, ChevronRight, Sparkles, Terminal, Wrench, CheckCircle, XCircle, AlertCircle, Zap, FolderOpen } from "lucide-react";
 import { api, type AgentEvent, type ActiveRun } from "../api/client";
@@ -269,6 +269,7 @@ export default function AgentConsole() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
   const {
+    sessions,
     getSession,
     createSession,
     setActiveSession,
@@ -277,7 +278,6 @@ export default function AgentConsole() {
     updateSessionProjectDir,
     updateSessionTeam,
     updateSessionQuality,
-    updateSessionSource,
     updateSessionStreaming,
   } = useChatSessions();
 
@@ -285,12 +285,10 @@ export default function AgentConsole() {
   const [messages, setMessages] = useState<MessageType[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [phase, setPhase] = useState<string>("working");
-  const [cliRun, setCliRun] = useState<ActiveRun | null>(null);
   const [showDirPicker, setShowDirPicker] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const eventsRef = useRef<AgentEvent[]>([]);
-  const subscribedRunRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | undefined>(sessionId);
   const pendingPromptRef = useRef<string>("");
   const pendingSessionIdRef = useRef<string>("");
@@ -298,14 +296,38 @@ export default function AgentConsole() {
   // Keep ref in sync for use in callbacks
   sessionIdRef.current = sessionId;
 
-  // Sync messages from stored session when sessionId changes.
-  // Note: setActiveSession is handled by ChatView when inside /chat/:sessionId,
-  // or here for the root / landing page.
+  // Derive current session reactively from the store
+  const currentSession = sessionId
+    ? sessions.find((s) => s.id === sessionId)
+    : undefined;
+
+  const isCliSession = currentSession?.source === "cli";
+
+  // For CLI sessions: derive messages directly from the store (purely reactive)
+  const cliMessages = useMemo<MessageType[]>(() => {
+    if (!isCliSession || !currentSession) return [];
+    const built = buildMessages(currentSession.events);
+    return currentSession.prompt
+      ? [{ kind: "user" as const, text: currentSession.prompt }, ...built]
+      : built;
+  }, [isCliSession, currentSession]);
+
+  const cliPhase = useMemo(() => {
+    if (!isCliSession || !currentSession) return "working";
+    const lastStatusEvt = [...currentSession.events].reverse().find(
+      (e) => e.type === "status" && (e.data as Record<string, unknown>)?.phase,
+    );
+    return lastStatusEvt
+      ? String((lastStatusEvt.data as Record<string, unknown>).phase)
+      : "working";
+  }, [isCliSession, currentSession]);
+
+  // Sync messages from stored session when sessionId changes (web sessions only).
   useEffect(() => {
     if (!sessionId) {
       setActiveSession(null);
     }
-    if (sessionId) {
+    if (sessionId && !isCliSession) {
       const session = getSession(sessionId);
       if (session && session.events.length > 0) {
         eventsRef.current = session.events;
@@ -318,18 +340,14 @@ export default function AgentConsole() {
         eventsRef.current = [];
         setMessages([]);
       }
-    } else {
+      setStreaming(false);
+    } else if (!sessionId) {
       eventsRef.current = [];
       setMessages([]);
+      setStreaming(false);
     }
-    setStreaming(false);
-    setCliRun(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streaming]);
+  }, [sessionId, isCliSession]);
 
   const handleEvent = useCallback((evt: AgentEvent) => {
     eventsRef.current = [...eventsRef.current, evt];
@@ -349,75 +367,6 @@ export default function AgentConsole() {
     }
   }, [updateSessionEvents]);
 
-  // Poll for active CLI runs and auto-create chat sessions for them
-  useEffect(() => {
-    if (streaming) return;
-
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const runs = await api.getActiveRuns();
-        if (cancelled) return;
-        const active = runs.find((r) => r.status === "running");
-        if (active && active.run_id !== subscribedRunRef.current) {
-          subscribedRunRef.current = active.run_id;
-
-          const cliSessionId = createSession();
-          updateSessionTitle(cliSessionId, deriveTitle(active.prompt || "CLI Run"));
-          updateSessionSource(cliSessionId, "cli");
-          updateSessionStreaming(cliSessionId, true);
-          navigate(`/chat/${cliSessionId}`, { replace: true });
-
-          setCliRun(active);
-          eventsRef.current = [];
-          setMessages([]);
-          setStreaming(true);
-          setPhase("working");
-          sessionIdRef.current = cliSessionId;
-
-          api.subscribeToRun(
-            active.run_id,
-            (evt: AgentEvent) => {
-              eventsRef.current = [...eventsRef.current, evt];
-              setMessages((prev) => {
-                const userMsg = prev.find((m) => m.kind === "user");
-                const built = buildMessages(eventsRef.current);
-                return userMsg ? [userMsg, ...built] : built;
-              });
-              const data = evt.data as Record<string, unknown> | undefined;
-              if (evt.type === "status" && data?.phase) {
-                setPhase(String(data.phase));
-              }
-              updateSessionEvents(cliSessionId, [...eventsRef.current]);
-            },
-            () => {
-              setStreaming(false);
-              setCliRun(null);
-              subscribedRunRef.current = null;
-              updateSessionStreaming(cliSessionId, false);
-            },
-            (err) => {
-              setMessages((prev) => [...prev, { kind: "error", text: err }]);
-              setStreaming(false);
-              setCliRun(null);
-              subscribedRunRef.current = null;
-              updateSessionStreaming(cliSessionId, false);
-            }
-          );
-        }
-      } catch {
-        // API server may not be reachable
-      }
-    };
-
-    poll();
-    const timer = setInterval(poll, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [streaming, createSession, updateSessionTitle, updateSessionSource, updateSessionStreaming, updateSessionEvents, navigate]);
-
   const startExecution = useCallback((targetSessionId: string, text: string, projectDir: string) => {
     updateSessionProjectDir(targetSessionId, projectDir);
     updateSessionStreaming(targetSessionId, true);
@@ -432,7 +381,6 @@ export default function AgentConsole() {
     sessionIdRef.current = targetSessionId;
     setPrompt("");
     eventsRef.current = [];
-    setCliRun(null);
     setMessages([{ kind: "user", text }]);
     setStreaming(true);
     setPhase("working");
@@ -455,7 +403,7 @@ export default function AgentConsole() {
 
   const handleRun = () => {
     const text = prompt.trim();
-    if (!text || streaming) return;
+    if (!text || displayStreaming) return;
 
     let targetSessionId = sessionId;
 
@@ -507,8 +455,15 @@ export default function AgentConsole() {
     e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
   };
 
-  const isEmpty = messages.length === 0;
-  const currentSession = sessionId ? getSession(sessionId) : undefined;
+  // For CLI sessions, use store-derived values; for web sessions, use local state
+  const displayMessages = isCliSession ? cliMessages : messages;
+  const displayStreaming = isCliSession ? !!currentSession?.streaming : streaming;
+  const displayPhase = isCliSession ? cliPhase : phase;
+  const isEmpty = displayMessages.length === 0 && !displayStreaming;
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [displayMessages, displayStreaming]);
 
   return (
     <div className="flex flex-col h-full bg-gray-50">
@@ -556,11 +511,22 @@ export default function AgentConsole() {
         ) : (
           /* Messages */
           <div className="max-w-3xl mx-auto py-8 space-y-5">
-            {cliRun && <CliRunBanner run={cliRun} />}
-            {messages.map((msg, i) => (
+            {currentSession?.source === "cli" && (
+              <CliRunBanner
+                run={{
+                  run_id: "",
+                  prompt: currentSession.prompt ?? "CLI Run",
+                  source: "cli",
+                  status: currentSession.streaming ? "running" : "completed",
+                  started_at: currentSession.createdAt,
+                  event_count: currentSession.events.length,
+                }}
+              />
+            )}
+            {displayMessages.map((msg, i) => (
               <ChatMessage key={i} msg={msg} />
             ))}
-            {streaming && <ThinkingIndicator phase={phase} />}
+            {displayStreaming && <ThinkingIndicator phase={displayPhase} />}
             <div ref={bottomRef} />
           </div>
         )}
@@ -577,13 +543,13 @@ export default function AgentConsole() {
               onKeyDown={handleKeyDown}
               placeholder="Message ch.ai…"
               rows={1}
-              disabled={streaming}
+              disabled={displayStreaming}
               className="w-full resize-none bg-transparent px-4 py-3.5 pr-14 text-sm text-gray-900 placeholder-gray-400 focus:outline-none disabled:opacity-60 max-h-[200px] leading-relaxed"
               style={{ height: "auto" }}
             />
             <button
               onClick={handleRun}
-              disabled={!prompt.trim() || streaming}
+              disabled={!prompt.trim() || displayStreaming}
               className="absolute right-2.5 bottom-2.5 w-9 h-9 flex items-center justify-center rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 disabled:bg-gray-200 disabled:text-gray-400 transition-all"
             >
               <ArrowUp size={16} strokeWidth={2.5} />

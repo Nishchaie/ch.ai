@@ -13,6 +13,7 @@ import {
 import AgentConsole from "./components/AgentConsole";
 import ChatView from "./components/ChatView";
 import { ChatSessionProvider, useChatSessions } from "./store/chatSessions";
+import { useCliRunWatcher } from "./hooks/useCliRunWatcher";
 
 function EditableTitle({
   value,
@@ -141,6 +142,8 @@ function AppContent() {
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
   const { createSession } = useChatSessions();
+
+  useCliRunWatcher();
 
   const handleNewChat = () => {
     const id = createSession();
