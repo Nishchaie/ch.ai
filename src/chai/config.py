@@ -19,9 +19,15 @@ CONFIG_DIR = Path.home() / ".chai"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 PROVIDER_MODELS: Dict[str, List[str]] = {
-    "claude_code": ["claude-sonnet-4-5-20250929"],
+    "claude_code": [
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+        "claude-sonnet-4-5-20250929",
+    ],
     "codex": ["codex-1"],
     "anthropic_api": [
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
         "claude-sonnet-4-5-20250929",
         "claude-opus-4-5-20251101",
     ],
@@ -123,7 +129,7 @@ class Config:
     """Global ch.ai configuration persisted in ~/.chai/config.json."""
 
     default_provider: str = "claude_code"
-    default_model: str = "claude-sonnet-4-5-20250929"
+    default_model: str = "claude-sonnet-4-6"
     verbose: bool = False
     theme: str = "default"
     keys: Dict[str, str] = field(default_factory=dict)

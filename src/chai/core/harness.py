@@ -70,6 +70,7 @@ class Harness:
                 RoleType.LEAD: AgentConfig(
                     role=RoleType.LEAD,
                     provider=ProviderType.CLAUDE_CODE,
+                    model="claude-opus-4-6",
                     autonomy_level=AutonomyLevel.HIGH,
                 ),
                 RoleType.FRONTEND: AgentConfig(

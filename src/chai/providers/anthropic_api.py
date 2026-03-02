@@ -23,7 +23,7 @@ class AnthropicAPIProvider(Provider):
         super().__init__(api_key, model, base_url)
         if not self.api_key:
             raise ValueError("Anthropic API requires api_key")
-        self._model = self.model or "claude-sonnet-4-5-20250929"
+        self._model = self.model or "claude-sonnet-4-6"
         self.rate_limiter = RateLimiter(
             max_requests=self.RATE_LIMIT, window_seconds=60.0
         )

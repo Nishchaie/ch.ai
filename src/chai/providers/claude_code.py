@@ -78,7 +78,7 @@ class ClaudeCodeProvider(Provider):
         stream: bool = False,
     ) -> Union[ProviderResponse, Generator[StreamChunk, None, ProviderResponse]]:
         self._ensure_binary()
-        model = self.model or "claude-sonnet-4-5-20250929"
+        model = self.model or "claude-sonnet-4-6"
         prompt = self._extract_prompt(messages)
 
         if stream:
