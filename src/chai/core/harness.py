@@ -39,6 +39,26 @@ class Harness:
         self._provider_factory = provider_factory or _default_provider_factory
         self._clarify = clarify or default_clarify
         self._router = ComplexityRouter()
+        self._warm_provider()
+
+    def _warm_provider(self) -> None:
+        """Pre-warm the default provider in a background thread.
+
+        For Claude Code, this starts a minimal CLI call so the session
+        is ready (Node.js loaded, auth negotiated) by the time the first
+        real ``chat()`` call happens.
+        """
+        if self._config.default_provider not in ("claude_code", "claude-code"):
+            return
+        try:
+            provider = self._provider_factory(
+                self._config.default_provider, self._config.default_model
+            )
+        except Exception:
+            return
+        if hasattr(provider, "warm"):
+            provider.warm()
+            self._warm_provider_instance = provider
 
     def create_team(self, config: Optional[TeamConfig] = None) -> Team:
         """Create a team. Auto-configures from project if config not provided."""
