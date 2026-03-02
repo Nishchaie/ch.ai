@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 ROUTER_MODELS = {
     "anthropic": "claude-haiku-4-5",
     "openai": "gpt-4o-mini",
+    "cli": "haiku",
 }
 
 
@@ -176,7 +177,7 @@ class ComplexityRouter:
                 "--print",
                 "--dangerously-skip-permissions",
                 f"--system-prompt={_ROUTER_SYSTEM_PROMPT}",
-                f"--model={ROUTER_MODELS['anthropic']}",
+                f"--model={ROUTER_MODELS['cli']}",
                 "--output-format=text",
                 prompt,
             ],
@@ -192,7 +193,11 @@ class ComplexityRouter:
                 f"{(result.stderr or '').strip()}"
             )
 
-        return _parse_routing_json(result.stdout)
+        stdout = (result.stdout or "").strip()
+        if not stdout:
+            raise RuntimeError("claude CLI returned empty output")
+
+        return _parse_routing_json(stdout)
 
     def _classify_fallback(self, prompt: str) -> RoutingResult:
         """Keyword-based fallback when neither API nor CLI is available."""

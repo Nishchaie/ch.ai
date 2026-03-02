@@ -1202,3 +1202,149 @@ class TestSimulationSummary:
         assert all_complete
         assert not missing
         assert len(events) > 0
+
+
+# ===================================================================
+# TEST 13: Interactive Build-and-Iterate Simulation
+# ===================================================================
+
+def _consume_run(harness, prompt, strategy, cancel_event):
+    """Test helper: consume a harness.run() generator, return TeamRunResult."""
+    cancel_event.clear()
+    gen = harness.run(prompt, strategy_override=strategy, cancel_event=cancel_event)
+    result = None
+    try:
+        while True:
+            next(gen)
+    except StopIteration as e:
+        result = e.value
+    return result
+
+
+class TestInteractiveSimulation:
+    """Simulates the README interactive build-and-iterate flow.
+
+    Exercises the full pipeline through _build_augmented_prompt and
+    _extract_run_summary to verify multi-turn context threading works
+    with real Harness/Team/AgentRunner execution.
+    """
+
+    def test_multi_turn_session_with_context(self, sim_project: Path) -> None:
+        from chai.cli import _build_augmented_prompt, _extract_run_summary
+
+        provider = SimulationProvider(manages_tools=True)
+        factory = lambda p, m: provider
+        harness = Harness(project_dir=str(sim_project), provider_factory=factory)
+
+        session_context: list[dict] = []
+        cancel_event = threading.Event()
+
+        # --- Prompt 1: Build ---
+        prompt1 = "Add email notifications for subscription events"
+        augmented1 = _build_augmented_prompt(prompt1, session_context)
+        assert augmented1 == prompt1  # no context yet
+
+        routing1 = harness._router.classify(prompt1)
+        result1 = _consume_run(harness, augmented1, routing1.strategy, cancel_event)
+
+        assert result1 is not None
+        assert all(t.status == TaskStatus.COMPLETED for t in result1.tasks)
+
+        entry1 = _extract_run_summary(prompt1, result1)
+        session_context.append(entry1)
+        assert len(session_context) == 1
+
+        # --- Prompt 2: Iterate ---
+        prompt2 = "Fix the notification template formatting"
+        augmented2 = _build_augmented_prompt(prompt2, session_context)
+        assert "[Session history" in augmented2
+        assert "email notifications" in augmented2 or prompt1 in augmented2
+        assert prompt2 in augmented2
+
+        routing2 = harness._router.classify(prompt2)
+        assert not cancel_event.is_set()  # cleared between runs
+        provider.reset()
+
+        result2 = _consume_run(harness, augmented2, routing2.strategy, cancel_event)
+        assert result2 is not None
+        entry2 = _extract_run_summary(prompt2, result2)
+        session_context.append(entry2)
+        assert len(session_context) == 2
+
+    def test_cancel_event_cleared_between_runs(self, sim_project: Path) -> None:
+        provider = SimulationProvider(manages_tools=True)
+        harness = Harness(
+            project_dir=str(sim_project),
+            provider_factory=lambda p, m: provider,
+        )
+        cancel_event = threading.Event()
+        cancel_event.set()  # simulate prior cancellation
+
+        cancel_event.clear()  # _run_in_repl does this
+        result = _consume_run(harness, "Fix typo", ExecutionStrategy.DIRECT, cancel_event)
+        assert result is not None
+
+    def test_context_truncation(self) -> None:
+        """Session context entries are truncated to prevent prompt explosion."""
+        from chai.cli import _build_augmented_prompt
+
+        session_context = [
+            {"prompt": "do a big thing", "outcome": "x" * 2000}
+        ]
+        augmented = _build_augmented_prompt("next thing", session_context)
+        assert len(augmented) < 1000
+
+    def test_augmented_prompt_contains_session_history(self) -> None:
+        from chai.cli import _build_augmented_prompt, _extract_run_summary
+
+        result1 = TeamRunResult(
+            tasks=[
+                TaskSpec(
+                    id="t1", title="Auth backend",
+                    role=RoleType.BACKEND, status=TaskStatus.COMPLETED,
+                ),
+                TaskSpec(
+                    id="t2", title="Auth QA",
+                    role=RoleType.QA, status=TaskStatus.COMPLETED,
+                ),
+            ],
+            duration_seconds=45.0,
+        )
+        entry = _extract_run_summary("add auth middleware", result1)
+        ctx = [entry]
+
+        augmented = _build_augmented_prompt("add rate limiting", ctx)
+        assert "[Session history" in augmented
+        assert "add auth middleware" in augmented
+        assert "[Current request]" in augmented
+        assert "add rate limiting" in augmented
+
+    def test_full_three_prompt_session(self, sim_project: Path) -> None:
+        """Full README scenario: build, iterate, plan create."""
+        from chai.cli import _build_augmented_prompt, _extract_run_summary
+
+        provider = SimulationProvider(manages_tools=True)
+        harness = Harness(
+            project_dir=str(sim_project),
+            provider_factory=lambda p, m: provider,
+        )
+        cancel_event = threading.Event()
+        session_context: list[dict] = []
+
+        # Prompt 1: build
+        p1 = "Add email notifications for subscription events"
+        r1 = _consume_run(harness, p1, None, cancel_event)
+        assert r1 is not None
+        session_context.append(_extract_run_summary(p1, r1))
+
+        # Prompt 2: iterate
+        p2 = "Fix the notification template formatting"
+        aug2 = _build_augmented_prompt(p2, session_context)
+        provider.reset()
+        r2 = _consume_run(harness, aug2, None, cancel_event)
+        assert r2 is not None
+        session_context.append(_extract_run_summary(p2, r2))
+
+        assert len(session_context) == 2
+        assert session_context[0]["prompt"] == p1
+        assert session_context[1]["prompt"] == p2

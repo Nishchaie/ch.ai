@@ -24,6 +24,7 @@ from .types import (
     ProviderType,
     RoleType,
     TeamConfig,
+    TeamRunResult,
     TaskStatus,
 )
 
@@ -624,49 +625,348 @@ def api(host: str, port: int, project_dir: Optional[str]) -> None:
     serve(host=host, port=port, project_dir=project_dir)
 
 
+def _extract_run_summary(raw_prompt: str, result: Optional[TeamRunResult]) -> dict:
+    """Build a session context entry from a completed run."""
+    if result is None:
+        return {"prompt": raw_prompt, "outcome": "Run failed or was cancelled."}
+    parts: list[str] = []
+    for task in result.tasks:
+        status_str = task.status.value if hasattr(task.status, "value") else str(task.status)
+        text = f"{task.title} [{status_str}]"
+        task_result = getattr(task, "result", None) or ""
+        if task_result:
+            text += f": {str(task_result)[:500]}"
+        parts.append(text)
+    duration = f" ({result.duration_seconds:.1f}s)" if result.duration_seconds else ""
+    outcome = "; ".join(parts) + duration if parts else f"No tasks{duration}"
+    return {"prompt": raw_prompt, "outcome": outcome}
+
+
+def _build_augmented_prompt(raw_prompt: str, session_context: list[dict]) -> str:
+    """Prepend session history to the raw prompt for context threading."""
+    if not session_context:
+        return raw_prompt
+    lines = ["[Session history - previous work in this session]"]
+    for i, entry in enumerate(session_context, 1):
+        outcome = entry.get("outcome", "")
+        if len(outcome) > 500:
+            outcome = outcome[:500] + "…"
+        lines.append(f"{i}. User: \"{entry['prompt']}\" -> {outcome}")
+    lines.append("")
+    lines.append("[Current request]")
+    lines.append(raw_prompt)
+    return "\n".join(lines)
+
+
+def _run_in_repl(
+    harness: "Harness",
+    ui: "TerminalUI",
+    prompt: str,
+    raw_prompt: str,
+    cancel_event: threading.Event,
+    console: Console,
+    db: Any = None,
+) -> Optional[TeamRunResult]:
+    """Execute a prompt inside the REPL with event streaming and cancellation."""
+    from .providers.base import cancel_active_providers
+    from .state import save_run, tasks_from_result
+
+    cancel_event.clear()
+
+    ui.stop_activity()
+    ui.start_activity("Routing…")
+    try:
+        routing = harness._router.classify(raw_prompt)
+    finally:
+        ui.stop_activity()
+
+    original_sigint = signal.getsignal(signal.SIGINT)
+
+    def _on_sigint(signum: int, frame: Any) -> None:
+        cancel_event.set()
+        cancel_active_providers()
+        console.print("\n[yellow]Cancelling…[/yellow]")
+        signal.signal(signal.SIGINT, original_sigint)
+
+    signal.signal(signal.SIGINT, _on_sigint)
+
+    run_id = str(uuid.uuid4())
+    forwarder = ApiEventForwarder(run_id, raw_prompt)
+    forwarder.start()
+
+    result: Optional[TeamRunResult] = None
+    ui.start_activity("Starting…")
+    try:
+        gen = harness.run(prompt, strategy_override=routing.strategy, cancel_event=cancel_event)
+        event_count = 0
+        try:
+            while True:
+                evt = next(gen)
+                event_count += 1
+                ui.print_event(evt)
+                forwarder.send_event(evt)
+                _handle_incremental_state(evt, raw_prompt)
+        except StopIteration as e:
+            result = e.value
+
+        tasks = tasks_from_result(result)
+        save_run(
+            project_dir=str(Path.cwd()),
+            tasks=tasks,
+            prompt=raw_prompt,
+            events_count=event_count,
+        )
+
+        if db is not None:
+            try:
+                import json as _json
+                db.save_team_run(raw_prompt, _json.dumps(tasks), result.duration_seconds if result else 0.0)
+            except Exception:
+                pass
+
+        if cancel_event.is_set():
+            console.print("\n[yellow]Cancelled.[/yellow]")
+        else:
+            console.print("\n[green]Done.[/green]")
+    except Exception as e:
+        console.print(ui.format_error(str(e)))
+    finally:
+        ui.stop_activity()
+        forwarder.close()
+        signal.signal(signal.SIGINT, original_sigint)
+
+    return result
+
+
 @cli.command()
 def interactive() -> None:
     """Interactive REPL mode with slash commands."""
+    try:
+        from .core.harness import Harness
+        from .ui.terminal import TerminalUI
+    except ImportError as e:
+        raise click.ClickException(f"Import error: {e}")
+
     console = Console()
+    factory = lambda p, m: _provider_factory(p, m)
+    harness = Harness(provider_factory=factory)
+    ui = TerminalUI(console=console)
+    cancel_event = threading.Event()
+    session_context: list[dict] = []
+    session_messages: list[dict] = []
+    db: Any = None
+
+    try:
+        from .sessions.db import Database
+        db = Database()
+        db.create_session()
+    except Exception:
+        pass
+
+    cfg = get_config()
     console.print("[bold]ch.ai Interactive[/bold] - Type /help for commands, /quit to exit.\n")
 
+    def _do_run(raw_prompt: str) -> None:
+        """Run a prompt and update session context."""
+        if db is not None:
+            try:
+                db.save_message("user", raw_prompt)
+            except Exception:
+                pass
+
+        augmented = _build_augmented_prompt(raw_prompt, session_context)
+        result = _run_in_repl(harness, ui, augmented, raw_prompt, cancel_event, console, db=db)
+        entry = _extract_run_summary(raw_prompt, result)
+        session_context.append(entry)
+
+        session_messages.append({"role": "user", "content": raw_prompt})
+        summary_text = entry.get("outcome", "")
+        session_messages.append({"role": "assistant", "content": summary_text})
+
+        if db is not None:
+            try:
+                db.save_message("assistant", summary_text)
+            except Exception:
+                pass
+
+        _try_compact(session_messages, db)
+
+    def _try_compact(messages: list[dict], database: Any) -> None:
+        """Compact session messages if approaching token limits."""
+        try:
+            from .sessions.compaction import maybe_compact
+            provider = factory(cfg.default_provider, cfg.default_model)
+            compacted, new_messages = maybe_compact(provider, messages)
+            if compacted:
+                messages.clear()
+                messages.extend(new_messages)
+                if database is not None and database._current_session_id:
+                    try:
+                        database.rewrite_session_with_summary(
+                            database._current_session_id,
+                            new_messages[:1],
+                            new_messages[-1:],
+                            new_messages[1]["content"] if len(new_messages) > 1 else "",
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def handle_cmd(line: str) -> bool:
+        """Handle a REPL input line. Returns False to exit."""
         line = line.strip()
-        if not line or not line.startswith("/"):
+        if not line:
             return True
-        cmd = line.split()[0].lower() if line.split() else ""
-        if cmd == "/quit" or cmd == "/exit":
+
+        if not line.startswith("/"):
+            _do_run(line)
+            return True
+
+        parts = line.split(maxsplit=1)
+        cmd = parts[0].lower()
+        args = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd in ("/quit", "/exit"):
             return False
+
+        elif cmd == "/run":
+            if not args:
+                console.print("[yellow]Usage: /run <prompt>[/yellow]")
+            else:
+                _do_run(args)
+
+        elif cmd == "/plan":
+            sub_parts = args.split(maxsplit=1) if args else []
+            sub_cmd = sub_parts[0].lower() if sub_parts else ""
+
+            if sub_cmd == "create":
+                plan_prompt = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+                if not plan_prompt:
+                    console.print("[yellow]Usage: /plan create <prompt>[/yellow]")
+                else:
+                    try:
+                        from .orchestration.planner import ExecutionPlanManager
+                        from .core.role import RoleRegistry
+                        from .core.task import TaskDecomposer
+                        team_inst = harness.create_team()
+                        lead_config = team_inst.get_members().get(RoleType.LEAD)
+                        if not lead_config:
+                            console.print("[red]Team has no Lead. Add a Lead agent.[/red]")
+                        else:
+                            provider = factory(lead_config.provider.value, lead_config.model)
+                            decomposer = TaskDecomposer(RoleRegistry())
+                            graph = decomposer.decompose(plan_prompt, provider)
+                            mgr = ExecutionPlanManager()
+                            plan_path = mgr.create_plan(plan_prompt, graph.all_tasks())
+                            console.print(f"[green]Plan created: {plan_path}[/green]")
+                    except Exception as e:
+                        console.print(ui.format_error(str(e)))
+
+            elif sub_cmd == "run":
+                plan_path = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+                if not plan_path:
+                    console.print("[yellow]Usage: /plan run <path>[/yellow]")
+                else:
+                    try:
+                        from .orchestration.planner import ExecutionPlanManager
+                        mgr = ExecutionPlanManager()
+                        plan_dict, tasks, err = mgr.load_plan(plan_path)
+                        if err or not tasks:
+                            console.print(f"[red]{err or 'No tasks in plan'}[/red]")
+                        else:
+                            cancel_event.clear()
+                            team_inst = harness.create_team()
+                            team_inst._cancel_event = cancel_event
+                            ui.stop_activity()
+                            ui.start_activity("Running plan…")
+                            plan_result = None
+                            try:
+                                gen = team_inst.run_graph(tasks)
+                                try:
+                                    while True:
+                                        evt = next(gen)
+                                        ui.print_event(evt)
+                                except StopIteration as e:
+                                    plan_result = e.value
+                            finally:
+                                ui.stop_activity()
+                            if plan_result:
+                                status_map = {t.id: t.status.value for t in plan_result.tasks}
+                                mgr.update_plan_status(plan_path, status_map)
+                            console.print("[green]Plan execution complete.[/green]")
+                    except Exception as e:
+                        console.print(ui.format_error(str(e)))
+            else:
+                try:
+                    from .orchestration.planner import ExecutionPlanManager
+                    mgr = ExecutionPlanManager()
+                    path = mgr.find_latest_plan()
+                    if path:
+                        _, tasks, _ = mgr.load_plan(path)
+                        ui.print_task_board(tasks or [])
+                    else:
+                        console.print("[yellow]No plans found.[/yellow]")
+                except Exception as e:
+                    console.print(f"[red]{e}[/red]")
+
+        elif cmd == "/history":
+            if session_context:
+                console.print("[bold]Session History[/bold]")
+                for i, entry in enumerate(session_context, 1):
+                    outcome = entry.get("outcome", "")
+                    if len(outcome) > 120:
+                        outcome = outcome[:120] + "…"
+                    console.print(f"  {i}. [cyan]{entry['prompt']}[/cyan] -> {outcome}")
+            else:
+                console.print("[dim]No runs in this session yet.[/dim]")
+
+        elif cmd == "/new":
+            session_context.clear()
+            session_messages.clear()
+            if db is not None:
+                try:
+                    db.create_session()
+                except Exception:
+                    pass
+            console.print("[green]New session started.[/green]")
+
+        elif cmd == "/clear":
+            session_context.clear()
+            session_messages.clear()
+            console.print("[green]Session context cleared.[/green]")
+
         elif cmd == "/team":
             try:
-                from .core.harness import Harness
-                from .ui.terminal import TerminalUI
-                harness = Harness(provider_factory=lambda p, m: _provider_factory(p, m))
-                team = harness.create_team()
-                ui = TerminalUI()
-                ui.print_team_status(team.get_status())
+                team_inst = harness.create_team()
+                ui.print_team_status(team_inst.get_status())
             except Exception as e:
                 console.print(f"[red]{e}[/red]")
-        elif cmd == "/plan":
-            try:
-                from .orchestration.planner import ExecutionPlanManager
-                from .ui.terminal import TerminalUI
-                mgr = ExecutionPlanManager()
-                path = mgr.find_latest_plan()
-                if path:
-                    _, tasks, _ = mgr.load_plan(path)
-                    ui = TerminalUI()
-                    ui.print_task_board(tasks or [])
-                else:
-                    console.print("[yellow]No plans found.[/yellow]")
-            except Exception as e:
-                console.print(f"[red]{e}[/red]")
+
         elif cmd == "/config":
             config_show()
+
         elif cmd == "/quality":
             quality()
+
         elif cmd == "/help":
-            console.print("Commands: /team, /plan, /config, /quality, /help, /quit")
+            console.print(
+                "Commands:\n"
+                "  /run <prompt>         Run a prompt explicitly\n"
+                "  /plan                 Show latest plan\n"
+                "  /plan create <prompt> Create an execution plan\n"
+                "  /plan run <path>      Execute a plan\n"
+                "  /history              Show session history\n"
+                "  /new                  Start a new session\n"
+                "  /clear                Clear session context\n"
+                "  /team                 Show team status\n"
+                "  /config               Show config\n"
+                "  /quality              Show quality scores\n"
+                "  /help                 Show this help\n"
+                "  /quit                 Exit interactive mode"
+            )
+        else:
+            console.print(f"[yellow]Unknown command: {cmd}. Type /help for commands.[/yellow]")
         return True
 
     while True:
@@ -674,6 +974,9 @@ def interactive() -> None:
             line = Prompt.ask("[chai]")
             if not handle_cmd(line):
                 break
-        except (EOFError, KeyboardInterrupt):
+        except KeyboardInterrupt:
+            console.print("\n[dim]Use /quit to exit.[/dim]")
+            continue
+        except EOFError:
             break
     console.print("[dim]Goodbye.[/dim]")

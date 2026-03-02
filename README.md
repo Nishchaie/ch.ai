@@ -70,7 +70,7 @@ chai config set keys.anthropic_api "sk-ant-..."
 export OPENAI_API_KEY="sk-..."
 chai config set keys.openai_api "sk-..."
 chai config set default_provider openai_api
-chai config set default_model gpt-5.2          # or gpt-5.2-codex
+chai config set default_model gpt-4-turbo      # or gpt-4
 ```
 
 **Option D -- Bring Your Own Model (any OpenAI-compatible API):**
@@ -79,6 +79,7 @@ chai config set default_model gpt-5.2          # or gpt-5.2-codex
 chai config set custom_base_url "http://localhost:11434/v1"
 chai config set custom_model "llama3"
 chai config set default_provider custom
+
 ```
 
 ### 3. Initialize and run
@@ -161,7 +162,29 @@ Roles are extensible via `RoleRegistry`. Add custom roles like `SecurityEngineer
 | `chai quality` | Show quality scores per domain |
 | `chai garden` | Run the doc gardener (find stale docs, broken links) |
 | `chai api` | Start the FastAPI server for the web frontend (`--host`, `--port`, `-d` project dir) |
-| `chai interactive` | Interactive REPL with `/team`, `/plan`, `/quality`, `/help` |
+| `chai interactive` | Interactive REPL — build, iterate, and manage plans in a persistent session |
+
+### Interactive Mode Commands
+
+Inside `chai interactive`, the following slash commands are available:
+
+| Command | Description |
+|---------|-------------|
+| `<plain text>` | Execute the prompt through the Harness (same as `/run`) |
+| `/run <prompt>` | Explicitly run a prompt |
+| `/plan` | Show the latest plan's task board |
+| `/plan create <prompt>` | Create an execution plan |
+| `/plan run <path>` | Execute an existing plan |
+| `/history` | Show runs in the current session |
+| `/new` | Start a new session (clears context, creates new DB session) |
+| `/clear` | Clear session context without creating a new DB session |
+| `/team` | Show team status |
+| `/config` | Show config |
+| `/quality` | Show quality scores |
+| `/help` | Show all commands |
+| `/quit` | Exit interactive mode |
+
+Session context threads across prompts: after each run, a summary of what was done is prepended to the next prompt so the agent can iterate on prior work. Ctrl+C during a run cancels it and returns to the prompt. Ctrl+D exits.
 
 ## Configuration
 
@@ -335,7 +358,44 @@ chai plan status docs/exec-plans/active/subscription-billing.md
 chai plan run docs/exec-plans/active/subscription-billing.md
 ```
 
-### Step 6 -- Maintain quality as you grow
+### Step 6 -- Build and iterate in interactive mode
+
+Interactive mode gives you a persistent session where each prompt carries context from prior runs. Type plain text to execute, or use slash commands for control.
+
+```bash
+chai interactive
+
+# Plain text runs through the full pipeline
+> Add email notifications for subscription events
+# ▸ planning → executing → reviewing → Done. (45s)
+
+# Next prompt knows what you just built
+> Fix the notification template formatting
+# The agent sees session history and builds on top of the previous work
+
+# Create a plan without executing it
+> /plan create Add admin dashboard
+
+# Session management
+> /history          # see what you've done this session
+> /new              # start fresh (clears context)
+> /clear            # clear context without starting a new DB session
+
+# Other commands
+> /team             # team status
+> /plan             # show latest plan's task board
+> /plan run <path>  # execute a plan
+> /config           # show config
+> /quality          # quality scores
+> /help             # list all commands
+> /quit             # exit
+```
+
+Context threading means the second prompt "Fix the notification template formatting" is aware of the email notification code created by the first prompt. The agent receives a session history summary so it can iterate on prior work without re-explaining the full context.
+
+Long sessions are automatically compacted to stay within token limits.
+
+### Step 7 -- Maintain quality as you grow
 
 ```bash
 # Check quality scores across domains
@@ -343,16 +403,9 @@ chai quality
 
 # Run the doc gardener to find stale docs and broken links
 chai garden
-
-# Interactive mode for ongoing work
-chai interactive
-> /team status
-> Add email notifications for subscription events
-> /quality
-> /plan create Add admin dashboard
 ```
 
-### Step 7 -- Use the web dashboard for visibility
+### Step 8 -- Use the web dashboard for visibility
 
 ```bash
 # Terminal 1
@@ -448,7 +501,7 @@ tests/            Test suite (mirrors src/ structure)
 
 ## Troubleshooting
 
-**`command not found: chai`** -- Make sure your virtual environment is activated (`source .venv/bin/activate`) and you've installed the package (`pip install -e .`).
+**`command not found: chai`** -- Make sure your virtual environment is activated (`source .venv/bin/activate`) and you've installed the package (`pip install -e ".[dev]"`).
 
 **`No API key found`** -- Set a provider key via environment variable (`export ANTHROPIC_API_KEY=...`) or config (`chai config set keys.anthropic_api ...`). If using Claude Code CLI, run `claude` once to authenticate.
 
