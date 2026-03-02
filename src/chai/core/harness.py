@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, Optional
 
@@ -54,6 +55,7 @@ class Harness:
         prompt: str,
         team_config: Optional[TeamConfig] = None,
         strategy_override: Optional[ExecutionStrategy] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Generator[AgentEvent, None, TeamRunResult]:
         """Run a prompt through complexity-based routing.
 
@@ -63,6 +65,7 @@ class Harness:
           FULL_PIPELINE -> team decomposition with worktrees + merge
         """
         team = self.create_team(team_config)
+        team._cancel_event = cancel_event or threading.Event()
 
         routing = self._router.classify(prompt)
         strategy = strategy_override or routing.strategy
@@ -83,6 +86,9 @@ class Harness:
         result: Optional[TeamRunResult] = None
         try:
             while True:
+                if team._cancel_event.is_set():
+                    gen.close()
+                    break
                 evt = next(gen)
                 yield evt
         except StopIteration as e:

@@ -59,9 +59,10 @@ class AgentRunner:
             system_prompt += f"\n\nRelevant context:\n{self._context}"
 
         if self._provider.manages_own_tools:
-            yield from self._run_cli_mode(task, system_prompt)
-            return
-        yield from self._run_api_loop(task, system_prompt)
+            result = yield from self._run_cli_mode(task, system_prompt)
+            return result
+        result = yield from self._run_api_loop(task, system_prompt)
+        return result
 
     def _run_cli_mode(self, task: TaskSpec, system_prompt: str) -> Generator[AgentEvent, None, str]:
         """For CLI-wrapped providers: stream tool activity, return result without text dump."""

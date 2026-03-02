@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Dict, Generator, List, Optional
 
 from ..config import ProjectConfig
 from ..providers.base import Provider
+from ..tools import get_default_tools
 from ..tools.base import ToolRegistry
 from ..types import (
     AgentConfig,
@@ -50,10 +52,11 @@ class Team:
         self._project_config = project_config
         self._project_dir = project_dir or "."
         self._provider_factory = provider_factory or _default_provider_factory
-        self._tools = tool_registry or ToolRegistry(base_dir=self._project_dir)
+        self._tools = tool_registry or get_default_tools(base_dir=self._project_dir)
         self._role_registry = role_registry or RoleRegistry()
         self._context = ContextManager(self._project_dir)
         self._state = TeamState.IDLE
+        self._cancel_event = threading.Event()
 
     @property
     def state(self) -> TeamState:
@@ -118,6 +121,24 @@ class Team:
             gen = runner.run(task)
             try:
                 while True:
+                    if self._cancel_event.is_set():
+                        gen.close()
+                        task.status = TaskStatus.CANCELLED
+                        cancel_evt = AgentEvent(
+                            type="status",
+                            data={"task_cancelled": task.id},
+                            role=task.role,
+                            task_id=task.id,
+                        )
+                        events.append(cancel_evt)
+                        yield cancel_evt
+                        self._state = TeamState.DONE
+                        return TeamRunResult(
+                            tasks=[task],
+                            results={task.id: ""},
+                            duration_seconds=time.monotonic() - start,
+                            events=events,
+                        )
                     evt = next(gen)
                     events.append(evt)
                     yield evt
@@ -310,6 +331,17 @@ class Team:
             active_futures: Dict[Future, tuple[str, RoleType]] = {}
 
             while not graph.is_complete():
+                if self._cancel_event.is_set():
+                    for future, (task_id, role) in list(active_futures.items()):
+                        future.cancel()
+                    for task in graph.all_tasks():
+                        if task.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                            graph.mark_failed(task.id, "Cancelled by user")
+                            task.status = TaskStatus.CANCELLED
+                    yield AgentEvent(type="status", data={"phase": "cancelled"})
+                    self._state = TeamState.DONE
+                    return
+
                 ready = graph.get_ready_tasks()
                 for task in ready:
                     graph.mark_in_progress(task.id)
@@ -333,6 +365,11 @@ class Team:
                     break
 
                 while active_futures:
+                    if self._cancel_event.is_set():
+                        for future in active_futures:
+                            future.cancel()
+                        break
+
                     while True:
                         try:
                             evt = event_queue.get_nowait()
@@ -479,6 +516,9 @@ class Team:
         try:
             gen = runner.run(task)
             while True:
+                if self._cancel_event.is_set():
+                    gen.close()
+                    break
                 try:
                     evt = next(gen)
                     event_queue.put(evt)

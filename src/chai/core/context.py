@@ -30,6 +30,10 @@ class ContextManager:
                 if fnmatch.fnmatch(rel_path, pattern):
                     matched.append(rel_path)
                     break
+                # **/foo patterns should also match foo at the project root
+                if pattern.startswith("**/") and fnmatch.fnmatch(rel_path, pattern[3:]):
+                    matched.append(rel_path)
+                    break
         matched.sort()
 
         if not matched:

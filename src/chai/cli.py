@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import uuid
 from pathlib import Path
@@ -232,15 +233,27 @@ def run(prompt: str, provider: Optional[str], model: Optional[str], max_agents: 
     forwarder = ApiEventForwarder(run_id, prompt)
     forwarder.connect()
 
+    import threading
+    cancel_event = threading.Event()
+
+    original_sigint = signal.getsignal(signal.SIGINT)
+
+    def _on_sigint(signum: int, frame: Any) -> None:
+        cancel_event.set()
+        ui.console.print("\n[yellow]Cancelling… press Ctrl+C again to force quit.[/yellow]")
+        signal.signal(signal.SIGINT, original_sigint)
+
+    signal.signal(signal.SIGINT, _on_sigint)
+
     try:
         from .state import save_run, tasks_from_result
 
         factory = lambda p, m: _provider_factory(p, m)
         harness = Harness(provider_factory=factory)
-        gen = harness.run(prompt)
+        gen = harness.run(prompt, cancel_event=cancel_event)
         result = None
         event_count = 0
-        ui.start_activity("Starting\u2026")
+        ui.start_activity("Starting…")
         try:
             while True:
                 evt = next(gen)
@@ -262,12 +275,22 @@ def run(prompt: str, provider: Optional[str], model: Optional[str], max_agents: 
             events_count=event_count,
         )
 
-        Console().print("\n[green]Done.[/green]")
+        if cancel_event.is_set():
+            Console().print("\n[yellow]Cancelled.[/yellow]")
+        else:
+            Console().print("\n[green]Done.[/green]")
+    except KeyboardInterrupt:
+        forwarder.close()
+        ui.stop_activity()
+        Console().print("\n[red]Force quit.[/red]")
+        raise SystemExit(130)
     except Exception as e:
         forwarder.close()
         ui.stop_activity()
         ui.console.print(ui.format_error(str(e)))
         raise SystemExit(1)
+    finally:
+        signal.signal(signal.SIGINT, original_sigint)
 
 
 @cli.command()
