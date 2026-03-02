@@ -1,4 +1,4 @@
-"""LLM-based routing: classifies prompt complexity via a fast Haiku call."""
+"""LLM-based routing: classifies prompt complexity via a fast model call."""
 
 from __future__ import annotations
 
@@ -9,11 +9,14 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
-ROUTER_MODEL = "claude-haiku-4-5"
+ROUTER_MODELS = {
+    "anthropic": "claude-haiku-4-5",
+    "openai": "gpt-4o-mini",
+}
 
 
 class ExecutionStrategy(str, Enum):
@@ -81,33 +84,39 @@ def _parse_routing_json(text: str) -> RoutingResult:
 
 
 class ComplexityRouter:
-    """Classifies prompt complexity via a fast Haiku call.
+    """Classifies prompt complexity via a fast LLM call.
 
-    Tries in order:
-      1. Anthropic API (fastest, needs API key)
-      2. Claude Code CLI (works if `claude` is installed)
-      3. Simple heuristic (no external deps)
+    Adapts to the user's configured provider:
+      - claude_code / anthropic_api: Claude CLI -> Anthropic API -> OpenAI API -> heuristic
+      - codex / openai_api:          OpenAI API -> Claude CLI -> Anthropic API -> heuristic
+      - custom:                      all three APIs attempted -> heuristic
     """
 
     def classify(self, prompt: str) -> RoutingResult:
-        # Try Anthropic API first
-        try:
-            return self._classify_api(prompt)
-        except Exception as exc:
-            logger.warning("API routing unavailable: %s", exc)
+        from ..config import get_config
+        provider = get_config().default_provider
 
-        # Fall back to Claude Code CLI
-        try:
-            return self._classify_cli(prompt)
-        except Exception as exc:
-            logger.warning("CLI routing unavailable: %s", exc)
+        if provider in ("openai_api", "codex"):
+            attempts: List[Callable[[str], RoutingResult]] = [
+                self._classify_openai, self._classify_cli, self._classify_anthropic,
+            ]
+        else:
+            attempts = [
+                self._classify_cli, self._classify_anthropic, self._classify_openai,
+            ]
 
-        # Last resort: simple heuristic
+        for attempt in attempts:
+            try:
+                return attempt(prompt)
+            except Exception as exc:
+                name = getattr(attempt, "__name__", type(attempt).__name__)
+                logger.warning("%s: %s", name, exc)
+
         logger.warning("LLM routing unavailable, using fallback heuristic")
         return self._classify_fallback(prompt)
 
-    def _classify_api(self, prompt: str) -> RoutingResult:
-        """Route via Anthropic Python SDK — fast, direct API call."""
+    def _classify_anthropic(self, prompt: str) -> RoutingResult:
+        """Route via Anthropic Python SDK."""
         import anthropic
 
         api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -119,7 +128,7 @@ class ComplexityRouter:
 
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
-            model=ROUTER_MODEL,
+            model=ROUTER_MODELS["anthropic"],
             max_tokens=256,
             system=_ROUTER_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -130,6 +139,30 @@ class ComplexityRouter:
             if getattr(block, "type", "") == "text":
                 text += getattr(block, "text", "")
 
+        return _parse_routing_json(text)
+
+    def _classify_openai(self, prompt: str) -> RoutingResult:
+        """Route via OpenAI Python SDK."""
+        import openai
+
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            from ..config import get_config
+            api_key = get_config().get_api_key("openai_api")
+        if not api_key:
+            raise ValueError("No OpenAI API key")
+
+        client = openai.OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=ROUTER_MODELS["openai"],
+            max_tokens=256,
+            messages=[
+                {"role": "system", "content": _ROUTER_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+        text = response.choices[0].message.content or ""
         return _parse_routing_json(text)
 
     def _classify_cli(self, prompt: str) -> RoutingResult:
@@ -143,7 +176,7 @@ class ComplexityRouter:
                 "--print",
                 "--dangerously-skip-permissions",
                 f"--system-prompt={_ROUTER_SYSTEM_PROMPT}",
-                f"--model={ROUTER_MODEL}",
+                f"--model={ROUTER_MODELS['anthropic']}",
                 "--output-format=text",
                 prompt,
             ],

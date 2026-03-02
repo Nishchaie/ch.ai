@@ -1,4 +1,4 @@
-"""Tests for ComplexityRouter (LLM-based with CLI fallback)."""
+"""Tests for ComplexityRouter (provider-aware LLM routing)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def router() -> ComplexityRouter:
     return ComplexityRouter()
 
 
-def _mock_api_response(strategy: str, reason: str, roles: Any = None) -> MagicMock:
+def _mock_anthropic_response(strategy: str, reason: str, roles: Any = None) -> MagicMock:
     """Build a mock Anthropic API response."""
     payload = {"strategy": strategy, "reason": reason, "suggested_roles": roles}
     block = MagicMock()
@@ -25,6 +25,18 @@ def _mock_api_response(strategy: str, reason: str, roles: Any = None) -> MagicMo
     block.text = json.dumps(payload)
     response = MagicMock()
     response.content = [block]
+    return response
+
+
+def _mock_openai_response(strategy: str, reason: str, roles: Any = None) -> MagicMock:
+    """Build a mock OpenAI API response."""
+    payload = {"strategy": strategy, "reason": reason, "suggested_roles": roles}
+    message = MagicMock()
+    message.content = json.dumps(payload)
+    choice = MagicMock()
+    choice.message = message
+    response = MagicMock()
+    response.choices = [choice]
     return response
 
 
@@ -36,39 +48,12 @@ def _mock_cli_result(strategy: str, reason: str, roles: Any = None) -> subproces
     )
 
 
-class TestAPIRouting:
-    """Tests the Anthropic API path."""
-
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("anthropic.Anthropic")
-    def test_simple_prompt_routes_direct(self, mock_cls: MagicMock, router: ComplexityRouter) -> None:
-        mock_cls.return_value.messages.create.return_value = _mock_api_response(
-            "direct", "Simple question"
-        )
-        result = router.classify("what does this function do?")
-        assert result.strategy == ExecutionStrategy.DIRECT
-        assert result.reason == "Simple question"
-
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("anthropic.Anthropic")
-    def test_build_prompt_routes_full_pipeline(self, mock_cls: MagicMock, router: ComplexityRouter) -> None:
-        mock_cls.return_value.messages.create.return_value = _mock_api_response(
-            "full_pipeline",
-            "Building a complete application",
-            ["lead", "frontend", "backend", "qa"],
-        )
-        result = router.classify("Build me a workday replacement")
-        assert result.strategy == ExecutionStrategy.FULL_PIPELINE
-        assert result.suggested_roles is not None
-
-
 class TestCLIRouting:
-    """Tests the Claude Code CLI fallback path."""
+    """Tests the Claude Code CLI path (tried first for claude_code provider)."""
 
-    @patch.dict("os.environ", {}, clear=True)
     @patch("shutil.which", return_value="/usr/local/bin/claude")
     @patch("subprocess.run")
-    def test_cli_fallback_on_no_api_key(
+    def test_cli_routes_small_team(
         self, mock_run: MagicMock, mock_which: MagicMock, router: ComplexityRouter
     ) -> None:
         mock_run.return_value = _mock_cli_result(
@@ -81,7 +66,6 @@ class TestCLIRouting:
         assert args[0] == "claude"
         assert "--print" in args
 
-    @patch.dict("os.environ", {}, clear=True)
     @patch("shutil.which", return_value="/usr/local/bin/claude")
     @patch("subprocess.run")
     def test_cli_passes_haiku_model(
@@ -93,31 +77,112 @@ class TestCLIRouting:
         assert any("claude-haiku-4-5" in a for a in args)
 
 
-class TestFallbackHeuristic:
-    """Tests the last-resort heuristic when neither API nor CLI is available."""
+class TestAnthropicAPIRouting:
+    """Tests the Anthropic API path (fallback when CLI unavailable)."""
 
-    def _classify_with_heuristic(self, router: ComplexityRouter, prompt: str) -> RoutingResult:
-        with patch.object(router, "_classify_api", side_effect=ValueError("no key")), \
-             patch.object(router, "_classify_cli", side_effect=FileNotFoundError("no cli")):
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("anthropic.Anthropic")
+    @patch("shutil.which", return_value=None)
+    def test_anthropic_fallback_routes_direct(
+        self, mock_which: MagicMock, mock_cls: MagicMock, router: ComplexityRouter
+    ) -> None:
+        mock_cls.return_value.messages.create.return_value = _mock_anthropic_response(
+            "direct", "Simple question"
+        )
+        result = router.classify("what does this function do?")
+        assert result.strategy == ExecutionStrategy.DIRECT
+        assert result.reason == "Simple question"
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("anthropic.Anthropic")
+    @patch("shutil.which", return_value=None)
+    def test_anthropic_fallback_routes_full_pipeline(
+        self, mock_which: MagicMock, mock_cls: MagicMock, router: ComplexityRouter
+    ) -> None:
+        mock_cls.return_value.messages.create.return_value = _mock_anthropic_response(
+            "full_pipeline",
+            "Building a complete application",
+            ["lead", "frontend", "backend", "qa"],
+        )
+        result = router.classify("Build me a workday replacement")
+        assert result.strategy == ExecutionStrategy.FULL_PIPELINE
+        assert result.suggested_roles is not None
+
+
+class TestOpenAIRouting:
+    """Tests the OpenAI API path (tried first for openai_api/codex providers)."""
+
+    @patch("chai.config.get_config")
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
+    @patch("openai.OpenAI")
+    def test_openai_tried_first_for_openai_provider(
+        self, mock_cls: MagicMock, mock_config: MagicMock, router: ComplexityRouter
+    ) -> None:
+        mock_config.return_value.default_provider = "openai_api"
+        mock_config.return_value.get_api_key.return_value = "test-key"
+        mock_cls.return_value.chat.completions.create.return_value = _mock_openai_response(
+            "full_pipeline", "Complex app", ["lead", "frontend", "backend"]
+        )
+        result = router.classify("Build me a SaaS platform")
+        assert result.strategy == ExecutionStrategy.FULL_PIPELINE
+        mock_cls.return_value.chat.completions.create.assert_called_once()
+
+    @patch("chai.config.get_config")
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
+    @patch("openai.OpenAI")
+    def test_openai_tried_first_for_codex_provider(
+        self, mock_cls: MagicMock, mock_config: MagicMock, router: ComplexityRouter
+    ) -> None:
+        mock_config.return_value.default_provider = "codex"
+        mock_config.return_value.get_api_key.return_value = "test-key"
+        mock_cls.return_value.chat.completions.create.return_value = _mock_openai_response(
+            "direct", "Simple task"
+        )
+        result = router.classify("fix a typo in README")
+        assert result.strategy == ExecutionStrategy.DIRECT
+
+    @patch("chai.config.get_config")
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
+    @patch("openai.OpenAI")
+    def test_openai_uses_gpt4o_mini(
+        self, mock_cls: MagicMock, mock_config: MagicMock, router: ComplexityRouter
+    ) -> None:
+        mock_config.return_value.default_provider = "openai_api"
+        mock_config.return_value.get_api_key.return_value = "test-key"
+        mock_cls.return_value.chat.completions.create.return_value = _mock_openai_response(
+            "direct", "Simple"
+        )
+        router.classify("check logs")
+        call_kwargs = mock_cls.return_value.chat.completions.create.call_args
+        assert call_kwargs[1]["model"] == "gpt-4o-mini" or call_kwargs.kwargs["model"] == "gpt-4o-mini"
+
+
+class TestFallbackHeuristic:
+    """Tests the last-resort heuristic when no LLM routing is available."""
+
+    def _force_fallback(self, router: ComplexityRouter, prompt: str) -> RoutingResult:
+        with patch.object(router, "_classify_cli", side_effect=FileNotFoundError("no cli")), \
+             patch.object(router, "_classify_anthropic", side_effect=ValueError("no key")), \
+             patch.object(router, "_classify_openai", side_effect=ValueError("no key")):
             return router.classify(prompt)
 
     def test_short_prompt_direct(self, router: ComplexityRouter) -> None:
-        result = self._classify_with_heuristic(router, "check the logs")
+        result = self._force_fallback(router, "check the logs")
         assert result.strategy == ExecutionStrategy.DIRECT
 
     def test_build_verb_small_team(self, router: ComplexityRouter) -> None:
-        result = self._classify_with_heuristic(router, "build a new login page")
+        result = self._force_fallback(router, "build a new login page")
         assert result.strategy == ExecutionStrategy.SMALL_TEAM
 
     def test_build_at_scale_full_pipeline(self, router: ComplexityRouter) -> None:
-        result = self._classify_with_heuristic(
+        result = self._force_fallback(
             router, "build me a replica of workday the hr software"
         )
         assert result.strategy == ExecutionStrategy.FULL_PIPELINE
         assert result.suggested_roles is not None
 
     def test_long_prompt_small_team(self, router: ComplexityRouter) -> None:
-        result = self._classify_with_heuristic(
+        result = self._force_fallback(
             router, "add a search endpoint to the API that filters users by name and returns paginated results"
         )
         assert result.strategy == ExecutionStrategy.SMALL_TEAM
