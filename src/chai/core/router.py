@@ -1,15 +1,26 @@
-"""LLM-based routing: classifies prompt complexity via a fast model call."""
+"""LLM-based routing: classifies prompt complexity via a fast model call.
+
+Eagerly initialises API clients and warms the CLI at construction time
+(inside ``Harness.__init__``), so that ``classify()`` is a single HTTP
+round-trip with no import / key-lookup / client-construction overhead.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
+
+from ..config import get_config
 
 _DEVNULL = subprocess.DEVNULL
 
@@ -20,6 +31,12 @@ ROUTER_MODELS = {
     "openai": "gpt-4o-mini",
     "cli": "haiku",
 }
+
+_CLI_TIMEOUT = 15
+
+_CLI_WARMUP_CMD = [
+    "claude", "--version", "--strict-mcp-config",
+]
 
 
 class ExecutionStrategy(str, Enum):
@@ -79,11 +96,9 @@ def _parse_routing_json(text: str) -> RoutingResult:
     if clean.startswith("```"):
         clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
-    # The model may prefix its JSON with conversational text; find the first '{'.
     brace = clean.find("{")
     if brace > 0:
         clean = clean[brace:]
-    # Trim any trailing text after the closing brace.
     last_brace = clean.rfind("}")
     if last_brace >= 0:
         clean = clean[: last_brace + 1]
@@ -99,74 +114,161 @@ def _parse_routing_json(text: str) -> RoutingResult:
 class ComplexityRouter:
     """Classifies prompt complexity via a fast LLM call.
 
-    Adapts to the user's configured provider:
-      - claude_code / anthropic_api: Claude CLI -> Anthropic API -> OpenAI API -> heuristic
-      - codex / openai_api:          OpenAI API -> Claude CLI -> Anthropic API -> heuristic
-      - custom:                      all three APIs attempted -> heuristic
+    All heavy work (module imports, key resolution, client construction,
+    CLI warm-up) happens in ``__init__`` so that ``classify()`` is a thin
+    concurrent dispatch over pre-built clients.
     """
 
-    def classify(self, prompt: str) -> RoutingResult:
-        from ..config import get_config
-        provider = get_config().default_provider
+    def __init__(self) -> None:
+        config = get_config()
+        self._provider = config.default_provider
 
-        if provider in ("openai_api", "codex"):
-            attempts: List[Callable[[str], RoutingResult]] = [
-                self._classify_openai, self._classify_cli, self._classify_anthropic,
+        self._anthropic_client: Any = None
+        self._openai_client: Any = None
+        self._cli_path: Optional[str] = None
+
+        self._init_anthropic(config)
+        self._init_openai(config)
+        self._init_cli()
+
+        self._classifiers = self._build_classifier_order()
+
+    # ------------------------------------------------------------------
+    # Eager initialisation helpers
+    # ------------------------------------------------------------------
+
+    def _init_anthropic(self, config: Any) -> None:
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        if not key and hasattr(config, "get_api_key"):
+            key = config.get_api_key("anthropic_api")
+        if not key:
+            return
+        try:
+            import anthropic
+
+            self._anthropic_client = anthropic.Anthropic(api_key=key)
+        except Exception as exc:
+            logger.debug("Anthropic client init skipped: %s", exc)
+
+    def _init_openai(self, config: Any) -> None:
+        key = os.environ.get("OPENAI_API_KEY")
+        if not key and hasattr(config, "get_api_key"):
+            key = config.get_api_key("openai_api")
+        if not key:
+            return
+        try:
+            import openai
+
+            self._openai_client = openai.OpenAI(api_key=key)
+        except Exception as exc:
+            logger.debug("OpenAI client init skipped: %s", exc)
+
+    def _init_cli(self) -> None:
+        self._cli_path = shutil.which("claude")
+        if not self._cli_path:
+            return
+        t = threading.Thread(target=self._warm_cli, daemon=True)
+        t.start()
+
+    def _warm_cli(self) -> None:
+        """Background ``claude --version`` to pull the Node runtime into OS page cache."""
+        try:
+            subprocess.run(
+                _CLI_WARMUP_CMD,
+                stdin=_DEVNULL,
+                capture_output=True,
+                timeout=_CLI_TIMEOUT,
+            )
+        except Exception:
+            pass
+
+    def _build_classifier_order(self) -> List[Callable[[str], RoutingResult]]:
+        if self._provider in ("openai_api", "codex"):
+            preferred = [
+                (self._openai_client, self._classify_openai),
+                (self._cli_path, self._classify_cli),
+                (self._anthropic_client, self._classify_anthropic),
             ]
         else:
-            attempts = [
-                self._classify_cli, self._classify_anthropic, self._classify_openai,
+            preferred = [
+                (self._cli_path, self._classify_cli),
+                (self._anthropic_client, self._classify_anthropic),
+                (self._openai_client, self._classify_openai),
             ]
+        return [fn for guard, fn in preferred if guard]
 
-        for attempt in attempts:
-            try:
-                return attempt(prompt)
-            except Exception as exc:
-                name = getattr(attempt, "__name__", type(attempt).__name__)
-                logger.warning("%s: %s", name, exc)
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-        logger.warning("LLM routing unavailable, using fallback heuristic")
+    def classify(self, prompt: str) -> RoutingResult:
+        if not self._classifiers:
+            logger.warning("No classifiers available, using fallback heuristic")
+            return self._classify_fallback(prompt)
+        return self._classify_concurrent(prompt, self._classifiers)
+
+    # ------------------------------------------------------------------
+    # Concurrent dispatch
+    # ------------------------------------------------------------------
+
+    def _classify_concurrent(
+        self,
+        prompt: str,
+        classifiers: List[Callable[[str], RoutingResult]],
+    ) -> RoutingResult:
+        """Fire all classifiers concurrently, return the first success."""
+        errors: List[str] = []
+        t0 = time.monotonic()
+
+        with ThreadPoolExecutor(max_workers=len(classifiers)) as pool:
+            future_to_name = {
+                pool.submit(fn, prompt): getattr(fn, "__name__", str(fn))
+                for fn in classifiers
+            }
+
+            for future in as_completed(future_to_name):
+                name = future_to_name[future]
+                try:
+                    result = future.result()
+                    elapsed = time.monotonic() - t0
+                    logger.info(
+                        "Routing via %s in %.1fs: %s", name, elapsed, result.strategy.value
+                    )
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    return result
+                except Exception as exc:
+                    msg = _short_error(exc)
+                    errors.append(f"{name}: {msg}")
+                    logger.warning("%s: %s", name, msg)
+
+        elapsed = time.monotonic() - t0
+        logger.warning(
+            "All %d classifiers failed in %.1fs, using fallback heuristic",
+            len(classifiers), elapsed,
+        )
+        for err in errors:
+            logger.debug("  %s", err)
         return self._classify_fallback(prompt)
 
+    # ------------------------------------------------------------------
+    # Individual classifiers (use pre-built clients, no imports / lookups)
+    # ------------------------------------------------------------------
+
     def _classify_anthropic(self, prompt: str) -> RoutingResult:
-        """Route via Anthropic Python SDK."""
-        import anthropic
-
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            from ..config import get_config
-            api_key = get_config().get_api_key("anthropic_api")
-        if not api_key:
-            raise ValueError("No Anthropic API key")
-
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
+        response = self._anthropic_client.messages.create(
             model=ROUTER_MODELS["anthropic"],
             max_tokens=256,
             system=_ROUTER_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-
         text = ""
         for block in response.content:
             if getattr(block, "type", "") == "text":
                 text += getattr(block, "text", "")
-
         return _parse_routing_json(text)
 
     def _classify_openai(self, prompt: str) -> RoutingResult:
-        """Route via OpenAI Python SDK."""
-        import openai
-
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            from ..config import get_config
-            api_key = get_config().get_api_key("openai_api")
-        if not api_key:
-            raise ValueError("No OpenAI API key")
-
-        client = openai.OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
+        response = self._openai_client.chat.completions.create(
             model=ROUTER_MODELS["openai"],
             max_tokens=256,
             messages=[
@@ -174,36 +276,36 @@ class ComplexityRouter:
                 {"role": "user", "content": prompt},
             ],
         )
-
         text = response.choices[0].message.content or ""
         return _parse_routing_json(text)
 
     def _classify_cli(self, prompt: str) -> RoutingResult:
-        """Route via Claude Code CLI — works without an API key."""
-        if not shutil.which("claude"):
-            raise FileNotFoundError("claude CLI not found")
-
         result = subprocess.run(
             [
-                "claude",
+                self._cli_path,
                 "--print",
                 "--dangerously-skip-permissions",
                 f"--system-prompt={_ROUTER_SYSTEM_PROMPT}",
                 f"--model={ROUTER_MODELS['cli']}",
                 "--output-format=text",
+                "--max-turns=1",
+                "--strict-mcp-config",
+                "--no-chrome",
+                "--no-session-persistence",
+                "--tools=",
                 prompt,
             ],
             stdin=_DEVNULL,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_CLI_TIMEOUT,
             env={**os.environ},
         )
 
         if result.returncode != 0:
             raise RuntimeError(
                 f"claude CLI failed (exit {result.returncode}): "
-                f"{(result.stderr or '').strip()}"
+                f"{(result.stderr or '').strip()[:200]}"
             )
 
         stdout = (result.stdout or "").strip()
@@ -212,26 +314,40 @@ class ComplexityRouter:
 
         return _parse_routing_json(stdout)
 
+    # ------------------------------------------------------------------
+    # Keyword heuristic fallback
+    # ------------------------------------------------------------------
+
     def _classify_fallback(self, prompt: str) -> RoutingResult:
-        """Keyword-based fallback when neither API nor CLI is available."""
-        words = prompt.lower().split()
+        lower = prompt.lower()
+        words = lower.split()
         word_set = set(words)
-        build_verbs = {"build", "create", "implement", "design", "develop", "make", "write"}
+        build_verbs = {
+            "build", "create", "implement", "design", "develop", "make", "write",
+            "scaffold", "generate", "set up", "setup", "bootstrap",
+        }
         scale_words = {
             "replica", "clone", "app", "application", "software", "platform",
             "system", "website", "product", "full", "complete", "entire",
-            "saas", "dashboard", "portal",
+            "saas", "dashboard", "portal", "marketplace", "e-commerce",
+        }
+        multi_domain = {
+            "frontend", "backend", "database", "api", "deploy", "ci", "cd",
+            "docker", "kubernetes", "infra", "migration",
         }
 
-        has_build = bool(build_verbs & word_set)
+        has_build = bool(build_verbs & word_set) or re.search(
+            r"\b(set\s+up|build\s+me|create\s+a|make\s+a|write\s+a)\b", lower
+        )
         has_scale = bool(scale_words & word_set)
+        domain_count = len(multi_domain & word_set)
 
         if not has_build and len(words) <= 10:
             return RoutingResult(
                 strategy=ExecutionStrategy.DIRECT,
                 reason="Short prompt without build intent (fallback)",
             )
-        if has_build and has_scale:
+        if has_build and (has_scale or domain_count >= 2):
             return RoutingResult(
                 strategy=ExecutionStrategy.FULL_PIPELINE,
                 reason="Build-at-scale detected (fallback)",
@@ -241,8 +357,18 @@ class ComplexityRouter:
             return RoutingResult(
                 strategy=ExecutionStrategy.SMALL_TEAM,
                 reason="Build-intent detected (fallback)",
+                suggested_roles=["lead", "frontend"],
             )
         return RoutingResult(
             strategy=ExecutionStrategy.SMALL_TEAM,
             reason="Non-trivial prompt (fallback)",
+            suggested_roles=["lead", "frontend"],
         )
+
+
+def _short_error(exc: Exception) -> str:
+    """Produce a concise error string, truncating subprocess timeout noise."""
+    msg = str(exc)
+    if len(msg) > 120:
+        return msg[:117] + "..."
+    return msg

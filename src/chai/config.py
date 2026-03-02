@@ -59,10 +59,24 @@ class SelfImprovementConfig:
 
 
 @dataclass
+class StackConfig:
+    """Per-role tech stack labels injected into system prompts."""
+
+    frontend: str = "React, TypeScript"
+    backend: str = "Python, FastAPI"
+    qa: str = "pytest"
+    deployment: str = "Docker"
+    prompt: str = ""
+    researcher: str = ""
+    _explicit: bool = False
+
+
+@dataclass
 class ProjectConfig:
     """Per-project config loaded from chai.yaml."""
 
     team: Optional[TeamConfig] = None
+    stack: StackConfig = field(default_factory=StackConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     self_improvement: SelfImprovementConfig = field(default_factory=SelfImprovementConfig)
 
@@ -119,6 +133,18 @@ class ProjectConfig:
                 update_principles_after_run=si.get("update_principles_after_run", True),
                 garbage_collect_schedule=si.get("garbage_collect_schedule", "manual"),
                 track_quality_scores=si.get("track_quality_scores", True),
+            )
+
+        if "stack" in raw:
+            s = raw["stack"]
+            config.stack = StackConfig(
+                frontend=s.get("frontend", "React, TypeScript"),
+                backend=s.get("backend", "Python, FastAPI"),
+                qa=s.get("qa", "pytest"),
+                deployment=s.get("deployment", "Docker"),
+                prompt=s.get("prompt", ""),
+                researcher=s.get("researcher", ""),
+                _explicit=True,
             )
 
         return config

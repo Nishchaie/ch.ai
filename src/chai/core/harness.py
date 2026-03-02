@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Generator, Optional
 
 from ..config import ProjectConfig, get_config
 from ..providers.base import Provider
-from ..types import AgentConfig, AgentEvent, AutonomyLevel, ProviderType, RoleType, TeamConfig, TeamRunResult
+from ..types import AgentConfig, AgentEvent, AutonomyLevel, ClarifyCallback, ProviderType, RoleType, TeamConfig, TeamRunResult, default_clarify
 from .router import ComplexityRouter, ExecutionStrategy
 from .team import Team
 
@@ -31,11 +31,13 @@ class Harness:
         self,
         project_dir: Optional[str] = None,
         provider_factory: Optional[Callable[[str, Optional[str]], Provider]] = None,
+        clarify: Optional[ClarifyCallback] = None,
     ) -> None:
         self._project_dir = Path(project_dir) if project_dir else Path.cwd()
         self._config = get_config()
         self._project_config = ProjectConfig.load(str(self._project_dir))
         self._provider_factory = provider_factory or _default_provider_factory
+        self._clarify = clarify or default_clarify
         self._router = ComplexityRouter()
 
     def create_team(self, config: Optional[TeamConfig] = None) -> Team:
@@ -48,6 +50,7 @@ class Harness:
             project_config=self._project_config,
             project_dir=str(self._project_dir),
             provider_factory=self._provider_factory,
+            clarify=self._clarify,
         )
 
     def run(

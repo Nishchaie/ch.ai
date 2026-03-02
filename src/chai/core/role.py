@@ -34,20 +34,20 @@ Roles: lead, frontend, backend, prompt, researcher, qa, deployment.
 - Output ONLY valid JSON, no markdown or extra text."""
 
 
-def _frontend_prompt() -> str:
-    return """You are the Frontend specialist. You implement UI, components, styling, and client-side logic.
+def _frontend_prompt(stack: str = "React, TypeScript") -> str:
+    return f"""You are the Frontend specialist. You implement UI, components, styling, and client-side logic.
 
-Task: {task}
+Task: {{task}}
 
-Focus on: React/TypeScript, accessibility, responsive design, component structure. Use the provided context files to understand the codebase."""
+Focus on: {stack}, accessibility, responsive design, component structure. Use the provided context files to understand the codebase."""
 
 
-def _backend_prompt() -> str:
-    return """You are the Backend specialist. You implement APIs, data models, business logic, and server-side services.
+def _backend_prompt(stack: str = "Python, FastAPI") -> str:
+    return f"""You are the Backend specialist. You implement APIs, data models, business logic, and server-side services.
 
-Task: {task}
+Task: {{task}}
 
-Focus on: Python/FastAPI, database patterns, API design, error handling. Use the provided context files to understand the codebase."""
+Focus on: {stack}, database patterns, API design, error handling. Use the provided context files to understand the codebase."""
 
 
 def _prompt_prompt() -> str:
@@ -66,31 +66,34 @@ Task: {task}
 Focus on: web search, documentation review, comparative analysis, summarization. You have read-only and search tools."""
 
 
-def _qa_prompt() -> str:
-    return """You are the QA specialist. You write tests, run validation, and ensure quality standards are met.
+def _qa_prompt(stack: str = "pytest") -> str:
+    return f"""You are the QA specialist. You write tests, run validation, and ensure quality standards are met.
 
-Task: {task}
+Task: {{task}}
 
-Focus on: unit tests, integration tests, linting, acceptance criteria validation. Use the provided context files."""
+Focus on: {stack}, unit tests, integration tests, linting, acceptance criteria validation. Use the provided context files."""
 
 
-def _deployment_prompt() -> str:
-    return """You are the Deployment specialist. You handle build, release, infrastructure, and CI/CD.
+def _deployment_prompt(stack: str = "Docker") -> str:
+    return f"""You are the Deployment specialist. You handle build, release, infrastructure, and CI/CD.
 
-Task: {task}
+Task: {{task}}
 
-Focus on: Docker, scripts, environment config, deployment pipelines. Use the provided context files."""
+Focus on: {stack}, scripts, environment config, deployment pipelines. Use the provided context files."""
 
 
 class RoleRegistry:
     """Registry of role definitions with lookup and registration."""
 
-    def __init__(self) -> None:
+    def __init__(self, stack: Optional["StackConfig"] = None) -> None:
         self._roles: Dict[RoleType, RoleDefinition] = {}
-        self._register_defaults()
+        self._register_defaults(stack)
 
-    def _register_defaults(self) -> None:
+    def _register_defaults(self, stack: Optional["StackConfig"] = None) -> None:
         """Pre-register all 7 default roles."""
+        from ..config import StackConfig
+
+        s = stack or StackConfig()
         defaults = [
             RoleDefinition(
                 role_type=RoleType.LEAD,
@@ -105,7 +108,7 @@ class RoleRegistry:
                 role_type=RoleType.FRONTEND,
                 name="Frontend",
                 description="Implements UI, components, and client-side logic",
-                system_prompt_template=_frontend_prompt(),
+                system_prompt_template=_frontend_prompt(s.frontend),
                 allowed_tools=ROLE_TOOL_ACCESS.get(RoleType.FRONTEND),
                 default_autonomy=AutonomyLevel.MEDIUM,
                 context_filters=["**/*.tsx", "**/*.ts", "**/*.jsx", "**/*.js", "**/frontend/**", "**/components/**"],
@@ -114,7 +117,7 @@ class RoleRegistry:
                 role_type=RoleType.BACKEND,
                 name="Backend",
                 description="Implements APIs, data models, and server-side logic",
-                system_prompt_template=_backend_prompt(),
+                system_prompt_template=_backend_prompt(s.backend),
                 allowed_tools=ROLE_TOOL_ACCESS.get(RoleType.BACKEND),
                 default_autonomy=AutonomyLevel.MEDIUM,
                 context_filters=["**/*.py", "**/api*.py", "**/models/**", "**/src/**"],
@@ -141,7 +144,7 @@ class RoleRegistry:
                 role_type=RoleType.QA,
                 name="QA",
                 description="Writes tests and validates quality",
-                system_prompt_template=_qa_prompt(),
+                system_prompt_template=_qa_prompt(s.qa),
                 allowed_tools=ROLE_TOOL_ACCESS.get(RoleType.QA),
                 default_autonomy=AutonomyLevel.MEDIUM,
                 context_filters=["**/test*.py", "**/*_test.*", "**/tests/**", "**/*.py"],
@@ -150,7 +153,7 @@ class RoleRegistry:
                 role_type=RoleType.DEPLOYMENT,
                 name="Deployment",
                 description="Handles build, release, and CI/CD",
-                system_prompt_template=_deployment_prompt(),
+                system_prompt_template=_deployment_prompt(s.deployment),
                 allowed_tools=ROLE_TOOL_ACCESS.get(RoleType.DEPLOYMENT),
                 default_autonomy=AutonomyLevel.MEDIUM,
                 context_filters=["**/Dockerfile*", "**/.github/**", "**/Makefile", "**/pyproject.toml"],

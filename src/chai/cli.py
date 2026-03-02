@@ -134,6 +134,18 @@ class ApiEventForwarder:
             self._thread.join(timeout=5)
 
 
+_active_ui: Any = None
+
+def _cli_clarify(question: str, default: str = "", field: str = "") -> str:
+    """Rich-based clarify callback that pauses the spinner during prompts."""
+    if _active_ui:
+        _active_ui.stop_activity()
+    answer = Prompt.ask(f"  {question}", default=default)
+    if _active_ui:
+        _active_ui.start_activity("Running\u2026")
+    return answer
+
+
 def _handle_incremental_state(evt: "AgentEvent", prompt: str) -> None:
     """Persist task state incrementally so the TaskBoard sees live updates."""
     from .state import save_tasks_initial, update_task_status
@@ -179,7 +191,15 @@ def _init_project(project_dir: Path) -> None:
 
     chai_yaml = project_dir / "chai.yaml"
     if not chai_yaml.exists():
-        chai_yaml.write_text("""# ch.ai project configuration
+        console = Console()
+        console.print("\n[bold]Configure your project tech stack[/bold]")
+        console.print("[dim]Press Enter to accept defaults, or type your own.[/dim]\n")
+        fe = Prompt.ask("  Frontend", default="React, TypeScript")
+        be = Prompt.ask("  Backend", default="Python, FastAPI")
+        qa_s = Prompt.ask("  Testing", default="pytest")
+        deploy = Prompt.ask("  Deployment", default="Docker")
+
+        chai_yaml.write_text(f"""# ch.ai project configuration
 # See README for full reference
 
 team:
@@ -194,6 +214,12 @@ team:
       provider: claude_code
     qa:
       provider: claude_code
+
+stack:
+  frontend: "{fe}"
+  backend: "{be}"
+  qa: "{qa_s}"
+  deployment: "{deploy}"
 
 validation:
   run_tests: true
@@ -300,8 +326,10 @@ def run(prompt: str, provider: Optional[str], model: Optional[str], max_agents: 
     try:
         from .state import save_run, tasks_from_result
 
+        global _active_ui
+        _active_ui = ui
         factory = lambda p, m: _provider_factory(p, m)
-        harness = Harness(provider_factory=factory)
+        harness = Harness(provider_factory=factory, clarify=_cli_clarify)
         gen = harness.run(prompt, cancel_event=cancel_event)
         result = None
         event_count = 0
@@ -383,7 +411,8 @@ def agent(role: str, prompt: str, provider: Optional[str], model: Optional[str])
         from .tools import create_tool_registry
         lead_ac = team_config.members[role_type]
         provider_inst = factory(provider, model)
-        role_reg = RoleRegistry()
+        project_config = ProjectConfig.load(str(Path.cwd()))
+        role_reg = RoleRegistry(project_config.stack)
         role_def = role_reg.get_role(role_type)
         if not role_def:
             from .core.role import RoleDefinition
@@ -483,7 +512,8 @@ def plan_create(prompt: str) -> None:
     provider = factory(lead_config.provider.value, lead_config.model)
     from .core.role import RoleRegistry
     from .core.task import TaskDecomposer
-    decomposer = TaskDecomposer(RoleRegistry())
+    project_config = ProjectConfig.load(str(Path.cwd()))
+    decomposer = TaskDecomposer(RoleRegistry(project_config.stack))
     graph = decomposer.decompose(prompt, provider)
     mgr = ExecutionPlanManager()
     path = mgr.create_plan(prompt, graph.all_tasks())
@@ -755,10 +785,12 @@ def interactive() -> None:
     except ImportError as e:
         raise click.ClickException(f"Import error: {e}")
 
+    global _active_ui
     console = Console()
     factory = lambda p, m: _provider_factory(p, m)
-    harness = Harness(provider_factory=factory)
+    harness = Harness(provider_factory=factory, clarify=_cli_clarify)
     ui = TerminalUI(console=console)
+    _active_ui = ui
     cancel_event = threading.Event()
     session_context: list[dict] = []
     session_messages: list[dict] = []
@@ -863,7 +895,7 @@ def interactive() -> None:
                             console.print("[red]Team has no Lead. Add a Lead agent.[/red]")
                         else:
                             provider = factory(lead_config.provider.value, lead_config.model)
-                            decomposer = TaskDecomposer(RoleRegistry())
+                            decomposer = TaskDecomposer(RoleRegistry(harness._project_config.stack))
                             graph = decomposer.decompose(plan_prompt, provider)
                             mgr = ExecutionPlanManager()
                             plan_path = mgr.create_plan(plan_prompt, graph.all_tasks())

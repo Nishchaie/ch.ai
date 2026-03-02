@@ -2,6 +2,7 @@
 
 import pytest
 
+from chai.config import StackConfig
 from chai.core.role import RoleDefinition, RoleRegistry
 from chai.types import AutonomyLevel, RoleType
 
@@ -73,3 +74,42 @@ class TestRoleRegistry:
         )
         reg.register_role(rd)
         assert reg.get_role(RoleType.BACKEND).name == "Custom Backend"
+
+    def test_custom_stack_in_prompts(self) -> None:
+        stack = StackConfig(
+            frontend="Vue 3, TypeScript",
+            backend="Go, Gin",
+            qa="Go testing",
+            deployment="Kubernetes",
+        )
+        reg = RoleRegistry(stack)
+
+        fe = reg.get_role(RoleType.FRONTEND)
+        assert "Vue 3" in fe.system_prompt_template
+        assert "React" not in fe.system_prompt_template
+
+        be = reg.get_role(RoleType.BACKEND)
+        assert "Go, Gin" in be.system_prompt_template
+        assert "FastAPI" not in be.system_prompt_template
+
+        qa = reg.get_role(RoleType.QA)
+        assert "Go testing" in qa.system_prompt_template
+        assert "pytest" not in qa.system_prompt_template
+
+        dep = reg.get_role(RoleType.DEPLOYMENT)
+        assert "Kubernetes" in dep.system_prompt_template
+        assert "Docker" not in dep.system_prompt_template
+
+    def test_default_stack_matches_original_prompts(self) -> None:
+        """No-arg RoleRegistry() still produces the same prompts as the old hardcoded strings."""
+        reg = RoleRegistry()
+        assert "React, TypeScript" in reg.get_role(RoleType.FRONTEND).system_prompt_template
+        assert "Python, FastAPI" in reg.get_role(RoleType.BACKEND).system_prompt_template
+        assert "pytest" in reg.get_role(RoleType.QA).system_prompt_template
+        assert "Docker" in reg.get_role(RoleType.DEPLOYMENT).system_prompt_template
+
+    def test_task_placeholder_preserved_with_custom_stack(self) -> None:
+        stack = StackConfig(frontend="Svelte", backend="Rust, Axum")
+        reg = RoleRegistry(stack)
+        for rt in (RoleType.FRONTEND, RoleType.BACKEND, RoleType.QA, RoleType.DEPLOYMENT):
+            assert "{task}" in reg.get_role(rt).system_prompt_template

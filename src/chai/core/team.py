@@ -16,12 +16,14 @@ from ..tools.base import ToolRegistry
 from ..types import (
     AgentConfig,
     AgentEvent,
+    ClarifyCallback,
     RoleType,
     TaskSpec,
     TaskStatus,
     TeamConfig,
     TeamRunResult,
     TeamState,
+    default_clarify,
 )
 from .agent import AgentRunner
 from .context import ContextManager
@@ -47,13 +49,15 @@ class Team:
         provider_factory: Optional[Callable[[str, Optional[str]], Provider]] = None,
         tool_registry: Optional[ToolRegistry] = None,
         role_registry: Optional[RoleRegistry] = None,
+        clarify: Optional[ClarifyCallback] = None,
     ) -> None:
         self._config = config
         self._project_config = project_config
         self._project_dir = project_dir or "."
         self._provider_factory = provider_factory or _default_provider_factory
         self._tools = tool_registry or get_default_tools(base_dir=self._project_dir)
-        self._role_registry = role_registry or RoleRegistry()
+        self._role_registry = role_registry or RoleRegistry(project_config.stack)
+        self._clarify = clarify or default_clarify
         self._context = ContextManager(self._project_dir)
         self._state = TeamState.IDLE
         self._cancel_event = threading.Event()
@@ -188,6 +192,9 @@ class Team:
             self._state = TeamState.PLANNING
             yield AgentEvent(type="status", data={"phase": "planning"})
 
+            if use_worktrees:
+                self._clarify_stack()
+
             lead_config = self._config.members.get(RoleType.LEAD)
             if not lead_config:
                 self._state = TeamState.FAILED
@@ -287,6 +294,32 @@ class Team:
         )
 
     # -- internal helpers --------------------------------------------------
+
+    def _clarify_stack(self) -> None:
+        """Ask the operator about tech stack when not explicitly configured."""
+        stack = self._project_config.stack
+        if stack._explicit:
+            return
+        role_questions = {
+            RoleType.FRONTEND: ("frontend stack", "frontend"),
+            RoleType.BACKEND: ("backend stack", "backend"),
+            RoleType.QA: ("testing stack", "qa"),
+            RoleType.DEPLOYMENT: ("deployment stack", "deployment"),
+        }
+        changed = False
+        for role, (label, attr) in role_questions.items():
+            if role in self._config.members:
+                current = getattr(stack, attr)
+                answer = self._clarify(
+                    f"What {label} does this project use?",
+                    current,
+                    f"stack.{attr}",
+                )
+                if answer != current:
+                    setattr(stack, attr, answer)
+                    changed = True
+        if changed:
+            self._role_registry = RoleRegistry(stack)
 
     def _pick_best_role(self, prompt: str) -> RoleType:
         """Heuristic: choose the best single role for a prompt."""

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 class RoleType(str, Enum):
@@ -127,3 +127,12 @@ class TeamRunResult:
     quality_score: Optional[float] = None
     validation: Optional[ValidationResult] = None
     events: List[AgentEvent] = field(default_factory=list)
+
+
+ClarifyCallback = Callable[[str, str, str], str]
+"""(question, default, field) -> answer. Lets the system ask the operator a question."""
+
+
+def default_clarify(question: str, default: str = "", field: str = "") -> str:
+    """Non-interactive fallback: always returns the default."""
+    return default
