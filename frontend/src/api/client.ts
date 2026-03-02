@@ -166,20 +166,35 @@ class ApiClient {
     const ws = new WebSocket(`${proto}//${host}${BASE}/api/teams/${encodeURIComponent(teamName)}/stream`);
     const payload: Record<string, string> = { prompt };
     if (projectDir) payload.project_dir = projectDir;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      onDone?.();
+    };
     ws.onopen = () => {
       ws.send(JSON.stringify(payload));
     };
     ws.onmessage = (e) => {
       const evt = JSON.parse(e.data) as AgentEvent;
       if (evt.type === "done") {
-        onDone?.();
+        finish();
       } else if (evt.type === "error") {
-        onError?.(String(evt.data));
+        if (!finished) {
+          finished = true;
+          onError?.(String(evt.data));
+        }
       } else {
         onEvent(evt);
       }
     };
-    ws.onerror = () => onError?.("WebSocket error");
+    ws.onerror = () => {
+      if (!finished) {
+        finished = true;
+        onError?.("WebSocket error");
+      }
+    };
+    ws.onclose = () => finish();
     return () => ws.close();
   }
 
@@ -203,17 +218,32 @@ class ApiClient {
     const ws = new WebSocket(
       `${proto}//${host}${BASE}/api/runs/${encodeURIComponent(runId)}/stream`
     );
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      onDone?.();
+    };
     ws.onmessage = (e) => {
       const evt = JSON.parse(e.data) as AgentEvent;
       if (evt.type === "done") {
-        onDone?.();
+        finish();
       } else if (evt.type === "error") {
-        onError?.(String(evt.data));
+        if (!finished) {
+          finished = true;
+          onError?.(String(evt.data));
+        }
       } else {
         onEvent(evt);
       }
     };
-    ws.onerror = () => onError?.("WebSocket error");
+    ws.onerror = () => {
+      if (!finished) {
+        finished = true;
+        onError?.("WebSocket error");
+      }
+    };
+    ws.onclose = () => finish();
     return () => ws.close();
   }
 }

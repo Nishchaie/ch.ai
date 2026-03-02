@@ -20,6 +20,8 @@ export interface ChatSession {
   projectDir?: string;
   teamSnapshot?: Team;
   qualitySnapshot?: Record<string, QualityScore>;
+  source?: "web" | "cli";
+  streaming?: boolean;
 }
 
 interface ChatSessionContextValue {
@@ -32,6 +34,8 @@ interface ChatSessionContextValue {
   updateSessionProjectDir: (id: string, projectDir: string) => void;
   updateSessionTeam: (id: string, team: Team) => void;
   updateSessionQuality: (id: string, quality: Record<string, QualityScore>) => void;
+  updateSessionSource: (id: string, source: "web" | "cli") => void;
+  updateSessionStreaming: (id: string, streaming: boolean) => void;
   deleteSession: (id: string) => void;
   getSession: (id: string) => ChatSession | undefined;
 }
@@ -67,7 +71,10 @@ export function deriveTitle(prompt: string): string {
 }
 
 export function ChatSessionProvider({ children }: { children: ReactNode }) {
-  const [sessions, setSessions] = useState<ChatSession[]>(loadSessions);
+  const [sessions, setSessions] = useState<ChatSession[]>(() => {
+    const loaded = loadSessions();
+    return loaded.map((s) => (s.streaming ? { ...s, streaming: false } : s));
+  });
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -127,6 +134,18 @@ export function ChatSessionProvider({ children }: { children: ReactNode }) {
     []
   );
 
+  const updateSessionSource = useCallback((id: string, source: "web" | "cli") => {
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, source } : s))
+    );
+  }, []);
+
+  const updateSessionStreaming = useCallback((id: string, streaming: boolean) => {
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, streaming } : s))
+    );
+  }, []);
+
   const deleteSession = useCallback(
     (id: string) => {
       setSessions((prev) => prev.filter((s) => s.id !== id));
@@ -157,6 +176,8 @@ export function ChatSessionProvider({ children }: { children: ReactNode }) {
         updateSessionProjectDir,
         updateSessionTeam,
         updateSessionQuality,
+        updateSessionSource,
+        updateSessionStreaming,
         deleteSession,
         getSession,
       }}

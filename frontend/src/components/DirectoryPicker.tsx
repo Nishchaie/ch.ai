@@ -49,6 +49,7 @@ export default function DirectoryPicker({ onConfirm, onCancel }: DirectoryPicker
         <div className="px-5 py-4 space-y-3">
           <p className="text-xs text-gray-500">
             Confirm or change the directory this chat session will operate in.
+            If the directory doesn't exist, it will be created automatically.
           </p>
           <input
             ref={inputRef}

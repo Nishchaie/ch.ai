@@ -1,7 +1,7 @@
 import { useRef, useEffect, useMemo, useState } from "react";
 import { useChatSessions } from "../store/chatSessions";
 import type { AgentEvent } from "../api/client";
-import { Terminal, ChevronDown, ChevronRight, CheckCircle, XCircle, AlertCircle } from "lucide-react";
+import { Terminal, ChevronDown, ChevronRight, CheckCircle, XCircle, AlertCircle, Loader2 } from "lucide-react";
 
 const ROLE_COLORS: Record<string, string> = {
   lead: "text-amber-400",
@@ -168,16 +168,24 @@ export default function ConsoleOutput() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [entries.length]);
 
+  const isStreaming = session?.streaming ?? false;
+
   return (
     <div className="space-y-4">
       <div>
         <div className="flex items-center gap-2 mb-1">
           <Terminal size={20} className="text-gray-500" />
           <h2 className="text-2xl font-bold text-gray-900">Console Output</h2>
+          {isStreaming && (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
+              <Loader2 size={10} className="animate-spin" />
+              Running
+            </span>
+          )}
         </div>
         <p className="text-gray-500 text-sm">
           {session
-            ? `${entries.length} events from: ${session.title}`
+            ? `${entries.length} event${entries.length !== 1 ? "s" : ""} from: ${session.title}`
             : "Select a chat session to view its console output"}
         </p>
       </div>
@@ -194,7 +202,7 @@ export default function ConsoleOutput() {
             </p>
           )}
         </div>
-      ) : entries.length === 0 ? (
+      ) : entries.length === 0 && !isStreaming ? (
         <div className="bg-white rounded-xl border border-gray-200 p-10 text-center shadow-sm">
           <p className="text-gray-500 text-sm">
             No events recorded for this session yet.
@@ -205,14 +213,17 @@ export default function ConsoleOutput() {
           {/* Terminal title bar */}
           <div className="flex items-center gap-2 px-4 py-2 bg-gray-800 border-b border-gray-700">
             <div className="flex gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-red-500/80" />
-              <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/80" />
-              <span className="w-2.5 h-2.5 rounded-full bg-green-500/80" />
+              <span className={`w-2.5 h-2.5 rounded-full ${isStreaming ? "bg-red-500 animate-pulse" : "bg-red-500/80"}`} />
+              <span className={`w-2.5 h-2.5 rounded-full ${isStreaming ? "bg-yellow-500 animate-pulse" : "bg-yellow-500/80"}`} />
+              <span className={`w-2.5 h-2.5 rounded-full ${isStreaming ? "bg-green-500 animate-pulse" : "bg-green-500/80"}`} />
             </div>
-            <span className="text-xs text-gray-500 font-mono ml-2 truncate">
+            <span className="text-xs text-gray-500 font-mono ml-2 truncate flex-1">
               {session.title}
               {session.projectDir && ` — ${session.projectDir}`}
             </span>
+            {isStreaming && (
+              <Loader2 size={12} className="text-emerald-400 animate-spin flex-shrink-0" />
+            )}
           </div>
 
           {/* Log lines */}
@@ -220,6 +231,19 @@ export default function ConsoleOutput() {
             {entries.map((entry) => (
               <LogLine key={entry.index} entry={entry} />
             ))}
+            {isStreaming && (
+              <div className="flex items-center gap-2 px-3 py-2 font-mono text-xs">
+                <span className="text-gray-600 select-none w-8 text-right flex-shrink-0" />
+                <span className="w-[10px] flex-shrink-0" />
+                <span className="w-16 flex-shrink-0" />
+                <span className="text-gray-500 flex-shrink-0" />
+                <span className="text-emerald-400 flex items-center gap-1.5">
+                  <Loader2 size={10} className="animate-spin" />
+                  processing...
+                  <span className="inline-block w-1.5 h-3.5 bg-emerald-400 animate-pulse" />
+                </span>
+              </div>
+            )}
             <div ref={bottomRef} />
           </div>
         </div>

@@ -1,35 +1,18 @@
 import { useState, useRef, useEffect } from "react";
-import { Routes, Route, NavLink, useNavigate, useParams } from "react-router-dom";
+import { Routes, Route, useNavigate } from "react-router-dom";
 import {
-  Users,
-  Kanban,
-  FileText,
-  BarChart2,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Sparkles,
-  MessageSquare,
   Trash2,
+  Radio,
   Terminal,
+  FolderOpen,
 } from "lucide-react";
-import TeamView from "./components/TeamView";
-import TaskBoard from "./components/TaskBoard";
 import AgentConsole from "./components/AgentConsole";
-import PlanViewer from "./components/PlanViewer";
-import PlanDetail from "./components/PlanDetail";
-import QualityDashboard from "./components/QualityDashboard";
-import ConsoleOutput from "./components/ConsoleOutput";
+import ChatView from "./components/ChatView";
 import { ChatSessionProvider, useChatSessions } from "./store/chatSessions";
-
-const NAV_ITEMS = [
-  { to: "/", icon: MessageSquare, label: "Chat", exact: true },
-  { to: "/console", icon: Terminal, label: "Console" },
-  { to: "/team", icon: Users, label: "Team" },
-  { to: "/tasks", icon: Kanban, label: "Tasks" },
-  { to: "/plans", icon: FileText, label: "Plans" },
-  { to: "/quality", icon: BarChart2, label: "Quality" },
-];
 
 function EditableTitle({
   value,
@@ -98,32 +81,52 @@ function ChatHistoryList({ collapsed }: { collapsed: boolean }) {
   if (sessions.length === 0 || collapsed) return null;
 
   return (
-    <div className="px-2 mt-1">
+    <div className="px-2 mt-1 flex-1 overflow-y-auto sidebar-scroll">
       <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider px-3 mb-1">
-        Recent
+        Chats
       </div>
-      <div className="space-y-0.5 max-h-[280px] overflow-y-auto sidebar-scroll">
+      <div className="space-y-0.5">
         {sessions.map((s) => (
           <div
             key={s.id}
-            className={`group flex items-center gap-2 rounded-lg px-3 py-2 text-sm cursor-pointer transition-colors ${
+            className={`group flex items-start gap-2 rounded-lg px-3 py-2 text-sm cursor-pointer transition-colors ${
               s.id === activeSessionId
                 ? "bg-gray-700 text-white"
                 : "text-gray-400 hover:text-gray-100 hover:bg-gray-700/50"
             }`}
             onClick={() => navigate(`/chat/${s.id}`)}
           >
-            <EditableTitle
-              value={s.title}
-              onSave={(newTitle) => updateSessionTitle(s.id, newTitle)}
-            />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-1.5">
+                {s.source === "cli" && (
+                  <Terminal size={10} className="text-violet-400 flex-shrink-0" />
+                )}
+                <EditableTitle
+                  value={s.title}
+                  onSave={(newTitle) => updateSessionTitle(s.id, newTitle)}
+                />
+                {s.streaming && (
+                  <span className="flex-shrink-0">
+                    <Radio size={10} className="text-emerald-400 animate-pulse" />
+                  </span>
+                )}
+              </div>
+              {s.projectDir && (
+                <div className="flex items-center gap-1 mt-0.5">
+                  <FolderOpen size={8} className="text-gray-600 flex-shrink-0" />
+                  <span className="text-[10px] text-gray-600 font-mono truncate">
+                    {s.projectDir.split("/").slice(-2).join("/")}
+                  </span>
+                </div>
+              )}
+            </div>
             <button
               onClick={(e) => {
                 e.stopPropagation();
                 deleteSession(s.id);
                 if (s.id === activeSessionId) navigate("/");
               }}
-              className="flex-shrink-0 p-0.5 rounded opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 transition-all"
+              className="flex-shrink-0 p-0.5 rounded opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 transition-all mt-0.5"
             >
               <Trash2 size={12} />
             </button>
@@ -200,45 +203,12 @@ function AppContent() {
           </button>
         )}
 
-        {/* Chat history */}
+        {/* Chat list */}
         <ChatHistoryList collapsed={collapsed} />
-
-        {/* Nav links */}
-        <nav className="flex-1 px-2 space-y-0.5 custom-scroll overflow-y-auto sidebar-scroll mt-2">
-          <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider px-3 mb-1">
-            Views
-          </div>
-          {NAV_ITEMS.filter((n) => n.to !== "/").map(({ to, icon: Icon, label, exact }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={exact}
-              className={({ isActive }) =>
-                `flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm transition-colors ${
-                  collapsed ? "justify-center px-2" : ""
-                } ${
-                  isActive
-                    ? "bg-gray-700 text-white font-medium"
-                    : "text-gray-400 hover:text-gray-100 hover:bg-gray-700/50"
-                }`
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon
-                    size={17}
-                    className={`flex-shrink-0 ${isActive ? "text-emerald-400" : ""}`}
-                  />
-                  {!collapsed && <span>{label}</span>}
-                </>
-              )}
-            </NavLink>
-          ))}
-        </nav>
 
         {/* Footer */}
         {!collapsed && (
-          <div className="px-4 py-3 border-t border-gray-700/50">
+          <div className="flex-shrink-0 px-4 py-3 border-t border-gray-700/50">
             <p className="text-xs text-gray-500">AI Engineering Harness</p>
           </div>
         )}
@@ -248,31 +218,9 @@ function AppContent() {
       <main className="flex-1 flex flex-col bg-gray-50 min-w-0 overflow-hidden">
         <Routes>
           <Route path="/" element={<AgentConsole />} />
-          <Route path="/chat/:sessionId" element={<AgentConsole />} />
-          <Route path="/console" element={<PageWrapper><ConsoleOutput /></PageWrapper>} />
-          <Route path="/team" element={<PageWrapper><TeamView /></PageWrapper>} />
-          <Route path="/tasks" element={<PageWrapper><TaskBoard /></PageWrapper>} />
-          <Route path="/plans" element={<PageWrapper><PlanViewer /></PageWrapper>} />
-          <Route path="/plans/:filename" element={<PageWrapper><PlanDetailRoute /></PageWrapper>} />
-          <Route path="/quality" element={<PageWrapper><QualityDashboard /></PageWrapper>} />
+          <Route path="/chat/:sessionId" element={<ChatView />} />
         </Routes>
       </main>
-    </div>
-  );
-}
-
-function PlanDetailRoute() {
-  const { filename } = useParams<{ filename: string }>();
-  if (!filename) return null;
-  return <PlanDetail filename={decodeURIComponent(filename)} />;
-}
-
-function PageWrapper({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex-1 overflow-y-auto custom-scroll">
-      <div className="max-w-5xl mx-auto px-6 py-8">
-        {children}
-      </div>
     </div>
   );
 }

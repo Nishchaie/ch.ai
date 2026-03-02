@@ -274,6 +274,7 @@ def _handle_incremental_state(evt_dict: Dict[str, Any], prompt: str, project_dir
 def _stream_harness(prompt: str, out_queue: std_queue.Queue, project_dir: Optional[str] = None) -> None:
     """Run harness and put events into thread-safe queue."""
     resolved_dir = _resolve_project_dir(project_dir)
+    Path(resolved_dir).mkdir(parents=True, exist_ok=True)
     try:
         from .core.harness import Harness
         factory = lambda p, m: _provider_factory(p, m)

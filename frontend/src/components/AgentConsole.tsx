@@ -277,6 +277,8 @@ export default function AgentConsole() {
     updateSessionProjectDir,
     updateSessionTeam,
     updateSessionQuality,
+    updateSessionSource,
+    updateSessionStreaming,
   } = useChatSessions();
 
   const [prompt, setPrompt] = useState("");
@@ -296,9 +298,13 @@ export default function AgentConsole() {
   // Keep ref in sync for use in callbacks
   sessionIdRef.current = sessionId;
 
-  // Sync active session and load stored events when sessionId changes
+  // Sync messages from stored session when sessionId changes.
+  // Note: setActiveSession is handled by ChatView when inside /chat/:sessionId,
+  // or here for the root / landing page.
   useEffect(() => {
-    setActiveSession(sessionId ?? null);
+    if (!sessionId) {
+      setActiveSession(null);
+    }
     if (sessionId) {
       const session = getSession(sessionId);
       if (session && session.events.length > 0) {
@@ -318,9 +324,8 @@ export default function AgentConsole() {
     }
     setStreaming(false);
     setCliRun(null);
-    // getSession uses a ref internally so it's stable -- safe to exclude
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, setActiveSession]);
+  }, [sessionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -344,7 +349,7 @@ export default function AgentConsole() {
     }
   }, [updateSessionEvents]);
 
-  // Poll for active CLI runs when idle
+  // Poll for active CLI runs and auto-create chat sessions for them
   useEffect(() => {
     if (streaming) return;
 
@@ -356,24 +361,47 @@ export default function AgentConsole() {
         const active = runs.find((r) => r.status === "running");
         if (active && active.run_id !== subscribedRunRef.current) {
           subscribedRunRef.current = active.run_id;
+
+          const cliSessionId = createSession();
+          updateSessionTitle(cliSessionId, deriveTitle(active.prompt || "CLI Run"));
+          updateSessionSource(cliSessionId, "cli");
+          updateSessionStreaming(cliSessionId, true);
+          navigate(`/chat/${cliSessionId}`, { replace: true });
+
           setCliRun(active);
           eventsRef.current = [];
           setMessages([]);
           setStreaming(true);
           setPhase("working");
+          sessionIdRef.current = cliSessionId;
+
           api.subscribeToRun(
             active.run_id,
-            handleEvent,
+            (evt: AgentEvent) => {
+              eventsRef.current = [...eventsRef.current, evt];
+              setMessages((prev) => {
+                const userMsg = prev.find((m) => m.kind === "user");
+                const built = buildMessages(eventsRef.current);
+                return userMsg ? [userMsg, ...built] : built;
+              });
+              const data = evt.data as Record<string, unknown> | undefined;
+              if (evt.type === "status" && data?.phase) {
+                setPhase(String(data.phase));
+              }
+              updateSessionEvents(cliSessionId, [...eventsRef.current]);
+            },
             () => {
               setStreaming(false);
               setCliRun(null);
               subscribedRunRef.current = null;
+              updateSessionStreaming(cliSessionId, false);
             },
             (err) => {
               setMessages((prev) => [...prev, { kind: "error", text: err }]);
               setStreaming(false);
               setCliRun(null);
               subscribedRunRef.current = null;
+              updateSessionStreaming(cliSessionId, false);
             }
           );
         }
@@ -388,12 +416,12 @@ export default function AgentConsole() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [streaming, handleEvent]);
+  }, [streaming, createSession, updateSessionTitle, updateSessionSource, updateSessionStreaming, updateSessionEvents, navigate]);
 
   const startExecution = useCallback((targetSessionId: string, text: string, projectDir: string) => {
     updateSessionProjectDir(targetSessionId, projectDir);
+    updateSessionStreaming(targetSessionId, true);
 
-    // Capture team and quality snapshots in the background
     api.getTeams().then((teams) => {
       if (teams[0]) updateSessionTeam(targetSessionId, teams[0]);
     }).catch(() => {});
@@ -412,14 +440,18 @@ export default function AgentConsole() {
       "default",
       text,
       handleEvent,
-      () => setStreaming(false),
+      () => {
+        setStreaming(false);
+        updateSessionStreaming(targetSessionId, false);
+      },
       (err) => {
         setMessages((prev) => [...prev, { kind: "error", text: err }]);
         setStreaming(false);
+        updateSessionStreaming(targetSessionId, false);
       },
       projectDir
     );
-  }, [handleEvent, updateSessionProjectDir, updateSessionTeam, updateSessionQuality]);
+  }, [handleEvent, updateSessionProjectDir, updateSessionTeam, updateSessionQuality, updateSessionStreaming]);
 
   const handleRun = () => {
     const text = prompt.trim();
