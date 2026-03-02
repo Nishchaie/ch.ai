@@ -280,39 +280,76 @@ class ComplexityRouter:
         return _parse_routing_json(text)
 
     def _classify_cli(self, prompt: str) -> RoutingResult:
-        result = subprocess.run(
+        """Route via Claude Code CLI using streaming JSON.
+
+        Uses ``Popen`` + ``stream-json`` so output is flushed per-event
+        (the CLI hangs on cleanup with ``--output-format=text``).  We
+        kill the process as soon as the ``result`` event arrives.
+        """
+        proc = subprocess.Popen(
             [
                 self._cli_path,
                 "--print",
                 "--dangerously-skip-permissions",
                 f"--system-prompt={_ROUTER_SYSTEM_PROMPT}",
                 f"--model={ROUTER_MODELS['cli']}",
-                "--output-format=text",
+                "--output-format=stream-json",
+                "--verbose",
                 "--max-turns=1",
                 "--strict-mcp-config",
                 "--no-chrome",
                 "--no-session-persistence",
-                "--tools=",
                 prompt,
             ],
             stdin=_DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=_CLI_TIMEOUT,
             env={**os.environ},
         )
 
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"claude CLI failed (exit {result.returncode}): "
-                f"{(result.stderr or '').strip()[:200]}"
-            )
+        try:
+            return self._read_cli_stream(proc)
+        finally:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
 
-        stdout = (result.stdout or "").strip()
-        if not stdout:
-            raise RuntimeError("claude CLI returned empty output")
+    def _read_cli_stream(self, proc: subprocess.Popen) -> RoutingResult:
+        """Read stream-json events from the CLI, extract the assistant message."""
+        t0 = time.monotonic()
+        assistant_text = ""
 
-        return _parse_routing_json(stdout)
+        for line in proc.stdout:
+            if time.monotonic() - t0 > _CLI_TIMEOUT:
+                raise TimeoutError(f"CLI stream exceeded {_CLI_TIMEOUT}s")
+
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            etype = evt.get("type", "")
+
+            if etype == "assistant":
+                msg = evt.get("message", {})
+                for block in msg.get("content", []):
+                    if block.get("type") == "text":
+                        assistant_text = block.get("text", "")
+
+            if etype == "result":
+                result_text = evt.get("result", assistant_text)
+                if not result_text:
+                    raise RuntimeError("CLI stream completed with no text")
+                return _parse_routing_json(result_text)
+
+        raise RuntimeError("CLI stream ended without a result event")
 
     # ------------------------------------------------------------------
     # Keyword heuristic fallback

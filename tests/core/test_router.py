@@ -40,11 +40,26 @@ def _mock_openai_response(strategy: str, reason: str, roles: Any = None) -> Magi
     return response
 
 
-def _mock_cli_result(strategy: str, reason: str, roles: Any = None) -> subprocess.CompletedProcess:
+def _mock_cli_stream(strategy: str, reason: str, roles: Any = None) -> MagicMock:
+    """Build a mock Popen whose stdout yields stream-json events."""
+    import io
+
     payload = {"strategy": strategy, "reason": reason, "suggested_roles": roles}
-    return subprocess.CompletedProcess(
-        args=[], returncode=0, stdout=json.dumps(payload), stderr=""
-    )
+    text = json.dumps(payload)
+
+    assistant_event = json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": text}]},
+    })
+    result_event = json.dumps({"type": "result", "result": text})
+    stream = io.StringIO(f"{assistant_event}\n{result_event}\n")
+
+    proc = MagicMock()
+    proc.stdout = stream
+    proc.stderr = io.StringIO("")
+    proc.kill = MagicMock()
+    proc.wait = MagicMock()
+    return proc
 
 
 def _make_router(**overrides: Any) -> ComplexityRouter:
@@ -75,47 +90,65 @@ def _make_router(**overrides: Any) -> ComplexityRouter:
 
 
 class TestCLIRouting:
-    """Tests the Claude Code CLI path."""
+    """Tests the Claude Code CLI path (uses Popen with stream-json)."""
 
     def test_cli_routes_small_team(self) -> None:
         with patch("chai.core.router.get_config", return_value=_mock_config()), \
              patch("shutil.which", return_value="/usr/local/bin/claude"), \
-             patch("subprocess.run") as mock_run:
-            mock_run.return_value = _mock_cli_result(
-                "small_team", "Moderate task", ["backend", "qa"]
-            )
+             patch("subprocess.run"), \
+             patch("subprocess.Popen") as mock_popen:
             router = ComplexityRouter()
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = _mock_cli_result(
+            mock_popen.return_value = _mock_cli_stream(
                 "small_team", "Moderate task", ["backend", "qa"]
             )
             result = router.classify("add a search endpoint with tests")
 
         assert result.strategy == ExecutionStrategy.SMALL_TEAM
-        args = mock_run.call_args[0][0]
+        args = mock_popen.call_args[0][0]
         assert args[0] == "/usr/local/bin/claude"
         assert "--print" in args
 
     def test_cli_passes_haiku_model(self) -> None:
         with patch("chai.core.router.get_config", return_value=_mock_config()), \
              patch("shutil.which", return_value="/usr/local/bin/claude"), \
-             patch("subprocess.run") as mock_run:
-            mock_run.return_value = _mock_cli_result("direct", "Simple fix")
+             patch("subprocess.run"), \
+             patch("subprocess.Popen") as mock_popen:
             router = ComplexityRouter()
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = _mock_cli_result("direct", "Simple fix")
+            mock_popen.return_value = _mock_cli_stream("direct", "Simple fix")
             router.classify("fix a typo")
 
-        args = mock_run.call_args[0][0]
+        args = mock_popen.call_args[0][0]
         assert any("haiku" in str(a) for a in args)
+
+    def test_cli_uses_stream_json(self) -> None:
+        with patch("chai.core.router.get_config", return_value=_mock_config()), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("subprocess.run"), \
+             patch("subprocess.Popen") as mock_popen:
+            router = ComplexityRouter()
+            mock_popen.return_value = _mock_cli_stream("direct", "Simple")
+            router.classify("test")
+
+        args = mock_popen.call_args[0][0]
+        assert "--output-format=stream-json" in args
+        assert "--verbose" in args
+
+    def test_cli_kills_process_after_result(self) -> None:
+        with patch("chai.core.router.get_config", return_value=_mock_config()), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("subprocess.run"), \
+             patch("subprocess.Popen") as mock_popen:
+            router = ComplexityRouter()
+            mock_proc = _mock_cli_stream("direct", "Simple")
+            mock_popen.return_value = mock_proc
+            router.classify("test")
+
+        mock_proc.kill.assert_called()
 
     def test_cli_warm_up_runs_on_init(self) -> None:
         with patch("chai.core.router.get_config", return_value=_mock_config()), \
              patch("shutil.which", return_value="/usr/local/bin/claude"), \
-             patch("subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="1.0.0", stderr="")
+             patch("subprocess.run"):
             router = ComplexityRouter()
             import time
             time.sleep(0.1)
