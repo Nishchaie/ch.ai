@@ -39,6 +39,7 @@ interface ChatSessionContextValue {
   updateSessionStreaming: (id: string, streaming: boolean) => void;
   updateSessionCliRunId: (id: string, cliRunId: string) => void;
   deleteSession: (id: string) => void;
+  clearAllSessions: () => void;
   getSession: (id: string) => ChatSession | undefined;
 }
 
@@ -72,10 +73,23 @@ export function deriveTitle(prompt: string): string {
   return trimmed.slice(0, 50) + "…";
 }
 
+function pruneStaleSessions(sessions: ChatSession[]): ChatSession[] {
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  return sessions.filter((s) => {
+    const isEmpty = s.events.length === 0 && s.title === "New Chat" && !s.prompt;
+    if (isEmpty && now - s.createdAt > ONE_DAY_MS) return false;
+    return true;
+  });
+}
+
 export function ChatSessionProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<ChatSession[]>(() => {
     const loaded = loadSessions();
-    return loaded.map((s) => (s.streaming ? { ...s, streaming: false } : s));
+    const cleaned = loaded.map((s) =>
+      s.streaming ? { ...s, streaming: false } : s
+    );
+    return pruneStaleSessions(cleaned);
   });
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
@@ -164,6 +178,11 @@ export function ChatSessionProvider({ children }: { children: ReactNode }) {
     [activeSessionId]
   );
 
+  const clearAllSessions = useCallback(() => {
+    setSessions([]);
+    setActiveSessionId(null);
+  }, []);
+
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
 
@@ -188,6 +207,7 @@ export function ChatSessionProvider({ children }: { children: ReactNode }) {
         updateSessionStreaming,
         updateSessionCliRunId,
         deleteSession,
+        clearAllSessions,
         getSession,
       }}
     >

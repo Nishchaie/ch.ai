@@ -76,15 +76,26 @@ function EditableTitle({
 }
 
 function ChatHistoryList({ collapsed }: { collapsed: boolean }) {
-  const { sessions, activeSessionId, deleteSession, updateSessionTitle } = useChatSessions();
+  const { sessions, activeSessionId, deleteSession, clearAllSessions, updateSessionTitle } = useChatSessions();
   const navigate = useNavigate();
 
   if (sessions.length === 0 || collapsed) return null;
 
   return (
     <div className="px-2 mt-1 flex-1 overflow-y-auto sidebar-scroll">
-      <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider px-3 mb-1">
-        Chats
+      <div className="flex items-center justify-between px-3 mb-1">
+        <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
+          Chats
+        </span>
+        <button
+          onClick={() => {
+            clearAllSessions();
+            navigate("/");
+          }}
+          className="text-[10px] text-gray-600 hover:text-red-400 transition-colors"
+        >
+          Clear all
+        </button>
       </div>
       <div className="space-y-0.5">
         {sessions.map((s) => (
