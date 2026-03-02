@@ -7,7 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import type { AgentEvent } from "../api/client";
+import type { AgentEvent, Team, QualityScore } from "../api/client";
 
 const STORAGE_KEY = "chai-chat-sessions";
 
@@ -17,6 +17,9 @@ export interface ChatSession {
   createdAt: number;
   events: AgentEvent[];
   prompt?: string;
+  projectDir?: string;
+  teamSnapshot?: Team;
+  qualitySnapshot?: Record<string, QualityScore>;
 }
 
 interface ChatSessionContextValue {
@@ -26,6 +29,9 @@ interface ChatSessionContextValue {
   setActiveSession: (id: string | null) => void;
   updateSessionEvents: (id: string, events: AgentEvent[]) => void;
   updateSessionTitle: (id: string, title: string) => void;
+  updateSessionProjectDir: (id: string, projectDir: string) => void;
+  updateSessionTeam: (id: string, team: Team) => void;
+  updateSessionQuality: (id: string, quality: Record<string, QualityScore>) => void;
   deleteSession: (id: string) => void;
   getSession: (id: string) => ChatSession | undefined;
 }
@@ -100,6 +106,27 @@ export function ChatSessionProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
+  const updateSessionProjectDir = useCallback((id: string, projectDir: string) => {
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, projectDir } : s))
+    );
+  }, []);
+
+  const updateSessionTeam = useCallback((id: string, team: Team) => {
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, teamSnapshot: team } : s))
+    );
+  }, []);
+
+  const updateSessionQuality = useCallback(
+    (id: string, quality: Record<string, QualityScore>) => {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, qualitySnapshot: quality } : s))
+      );
+    },
+    []
+  );
+
   const deleteSession = useCallback(
     (id: string) => {
       setSessions((prev) => prev.filter((s) => s.id !== id));
@@ -127,6 +154,9 @@ export function ChatSessionProvider({ children }: { children: ReactNode }) {
         setActiveSession,
         updateSessionEvents,
         updateSessionTitle,
+        updateSessionProjectDir,
+        updateSessionTeam,
+        updateSessionQuality,
         deleteSession,
         getSession,
       }}

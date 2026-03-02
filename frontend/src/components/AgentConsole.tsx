@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowUp, ChevronDown, ChevronRight, Sparkles, Terminal, Wrench, CheckCircle, XCircle, AlertCircle, Zap } from "lucide-react";
+import { ArrowUp, ChevronDown, ChevronRight, Sparkles, Terminal, Wrench, CheckCircle, XCircle, AlertCircle, Zap, FolderOpen } from "lucide-react";
 import { api, type AgentEvent, type ActiveRun } from "../api/client";
 import { useChatSessions, deriveTitle } from "../store/chatSessions";
+import DirectoryPicker from "./DirectoryPicker";
 
 const ROLE_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
   lead: { bg: "bg-amber-100", text: "text-amber-700", dot: "bg-amber-500" },
@@ -273,6 +274,9 @@ export default function AgentConsole() {
     setActiveSession,
     updateSessionEvents,
     updateSessionTitle,
+    updateSessionProjectDir,
+    updateSessionTeam,
+    updateSessionQuality,
   } = useChatSessions();
 
   const [prompt, setPrompt] = useState("");
@@ -280,11 +284,14 @@ export default function AgentConsole() {
   const [streaming, setStreaming] = useState(false);
   const [phase, setPhase] = useState<string>("working");
   const [cliRun, setCliRun] = useState<ActiveRun | null>(null);
+  const [showDirPicker, setShowDirPicker] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const eventsRef = useRef<AgentEvent[]>([]);
   const subscribedRunRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | undefined>(sessionId);
+  const pendingPromptRef = useRef<string>("");
+  const pendingSessionIdRef = useRef<string>("");
 
   // Keep ref in sync for use in callbacks
   sessionIdRef.current = sessionId;
@@ -383,23 +390,16 @@ export default function AgentConsole() {
     };
   }, [streaming, handleEvent]);
 
-  const handleRun = () => {
-    const text = prompt.trim();
-    if (!text || streaming) return;
+  const startExecution = useCallback((targetSessionId: string, text: string, projectDir: string) => {
+    updateSessionProjectDir(targetSessionId, projectDir);
 
-    let targetSessionId = sessionId;
-
-    // Auto-create session if on landing page
-    if (!targetSessionId) {
-      targetSessionId = createSession();
-      navigate(`/chat/${targetSessionId}`, { replace: true });
-    }
-
-    // Set title from first prompt
-    const session = getSession(targetSessionId);
-    if (session && session.title === "New Chat") {
-      updateSessionTitle(targetSessionId, deriveTitle(text));
-    }
+    // Capture team and quality snapshots in the background
+    api.getTeams().then((teams) => {
+      if (teams[0]) updateSessionTeam(targetSessionId, teams[0]);
+    }).catch(() => {});
+    api.getQuality().then((q) => {
+      updateSessionQuality(targetSessionId, q);
+    }).catch(() => {});
 
     sessionIdRef.current = targetSessionId;
     setPrompt("");
@@ -416,8 +416,50 @@ export default function AgentConsole() {
       (err) => {
         setMessages((prev) => [...prev, { kind: "error", text: err }]);
         setStreaming(false);
-      }
+      },
+      projectDir
     );
+  }, [handleEvent, updateSessionProjectDir, updateSessionTeam, updateSessionQuality]);
+
+  const handleRun = () => {
+    const text = prompt.trim();
+    if (!text || streaming) return;
+
+    let targetSessionId = sessionId;
+
+    if (!targetSessionId) {
+      targetSessionId = createSession();
+      navigate(`/chat/${targetSessionId}`, { replace: true });
+    }
+
+    const session = getSession(targetSessionId);
+    if (session && session.title === "New Chat") {
+      updateSessionTitle(targetSessionId, deriveTitle(text));
+    }
+
+    // If this session already has a projectDir, skip the picker
+    if (session?.projectDir) {
+      startExecution(targetSessionId, text, session.projectDir);
+      return;
+    }
+
+    // Show directory picker before first execution
+    pendingPromptRef.current = text;
+    pendingSessionIdRef.current = targetSessionId;
+    setShowDirPicker(true);
+  };
+
+  const handleDirConfirm = (dir: string) => {
+    setShowDirPicker(false);
+    const sid = pendingSessionIdRef.current;
+    const text = pendingPromptRef.current;
+    if (sid && text) {
+      startExecution(sid, text, dir);
+    }
+  };
+
+  const handleDirCancel = () => {
+    setShowDirPicker(false);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -434,9 +476,24 @@ export default function AgentConsole() {
   };
 
   const isEmpty = messages.length === 0;
+  const currentSession = sessionId ? getSession(sessionId) : undefined;
 
   return (
     <div className="flex flex-col h-full bg-gray-50">
+      {showDirPicker && (
+        <DirectoryPicker onConfirm={handleDirConfirm} onCancel={handleDirCancel} />
+      )}
+
+      {/* Project dir badge */}
+      {currentSession?.projectDir && (
+        <div className="flex-shrink-0 px-4 py-2 border-b border-gray-200 bg-white">
+          <div className="max-w-3xl mx-auto flex items-center gap-2 text-xs text-gray-500">
+            <FolderOpen size={12} className="text-gray-400" />
+            <span className="font-mono truncate">{currentSession.projectDir}</span>
+          </div>
+        </div>
+      )}
+
       {/* Chat area */}
       <div className="flex-1 overflow-y-auto chat-scroll px-4">
         {isEmpty ? (

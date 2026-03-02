@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type QualityScore } from "../api/client";
+import { useChatSessions } from "../store/chatSessions";
 import { BarChart2 } from "lucide-react";
 
 const GRADE_STYLE: Record<string, { bg: string; text: string; border: string }> = {
@@ -19,13 +20,7 @@ const SCORE_BAR_COLOR = (score: number) => {
   return "bg-red-500";
 };
 
-export default function QualityDashboard() {
-  const [scores, setScores] = useState<Record<string, QualityScore>>({});
-
-  useEffect(() => {
-    api.getQuality().then(setScores);
-  }, []);
-
+function ScoresView({ scores, sessionTitle }: { scores: Record<string, QualityScore>; sessionTitle?: string }) {
   const entries = Object.entries(scores);
 
   if (entries.length === 0) {
@@ -33,7 +28,9 @@ export default function QualityDashboard() {
       <div className="space-y-6">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Quality Dashboard</h2>
-          <p className="text-gray-500 text-sm mt-1">Code quality scores by domain</p>
+          <p className="text-gray-500 text-sm mt-1">
+            {sessionTitle ? `${sessionTitle} · ` : ""}Code quality scores by domain
+          </p>
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-10 text-center shadow-sm">
           <BarChart2 size={32} className="mx-auto text-gray-300 mb-3" />
@@ -57,11 +54,11 @@ export default function QualityDashboard() {
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Quality Dashboard</h2>
         <p className="text-gray-500 text-sm mt-1">
+          {sessionTitle && <span className="text-gray-400">{sessionTitle} · </span>}
           Overall average: {(avgScore * 100).toFixed(1)}%
         </p>
       </div>
 
-      {/* Summary bar */}
       <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
         <div className="flex items-center justify-between mb-2">
           <span className="text-sm font-medium text-gray-700">Overall Quality</span>
@@ -75,7 +72,6 @@ export default function QualityDashboard() {
         </div>
       </div>
 
-      {/* Per-domain scores */}
       <div className="space-y-3">
         {entries.map(([domain, info]) => {
           const gradeStyle = GRADE_STYLE[info.grade?.charAt(0).toUpperCase() ?? ""] ?? DEFAULT_GRADE_STYLE;
@@ -108,4 +104,25 @@ export default function QualityDashboard() {
       </div>
     </div>
   );
+}
+
+export default function QualityDashboard() {
+  const { activeSessionId, getSession } = useChatSessions();
+  const activeSession = activeSessionId ? getSession(activeSessionId) : undefined;
+
+  if (activeSession?.qualitySnapshot) {
+    return <ScoresView scores={activeSession.qualitySnapshot} sessionTitle={activeSession.title} />;
+  }
+
+  return <GlobalQualityDashboard />;
+}
+
+function GlobalQualityDashboard() {
+  const [scores, setScores] = useState<Record<string, QualityScore>>({});
+
+  useEffect(() => {
+    api.getQuality().then(setScores);
+  }, []);
+
+  return <ScoresView scores={scores} />;
 }

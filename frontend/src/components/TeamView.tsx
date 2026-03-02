@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Team } from "../api/client";
+import { useChatSessions } from "../store/chatSessions";
 import { Spinner } from "./Spinner";
 import { Activity } from "lucide-react";
 
@@ -68,7 +69,66 @@ function RoleCard({
   );
 }
 
+function TeamGrid({ team, sessionTitle }: { team: Team; sessionTitle?: string }) {
+  const members = team.members ?? {};
+  const memberCount = Object.keys(members).length;
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold text-gray-900">Team Composition</h2>
+        <p className="text-gray-500 text-sm mt-1">
+          {sessionTitle && <span className="text-gray-400">{sessionTitle} · </span>}
+          {memberCount > 0
+            ? `${memberCount} agent${memberCount !== 1 ? "s" : ""} configured`
+            : "No agents configured yet"}
+        </p>
+      </div>
+
+      {memberCount > 0 ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+          {Object.entries(members).map(([role, info]) => {
+            const obj = typeof info === "object" && info ? info : {};
+            const prov = "provider" in obj && obj.provider != null ? String(obj.provider) : undefined;
+            const mod = "model" in obj && obj.model != null ? String(obj.model) : undefined;
+            return (
+              <RoleCard
+                key={role}
+                role={role}
+                provider={prov}
+                model={mod}
+              />
+            );
+          })}
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-gray-200 p-8 text-center shadow-sm">
+          <p className="text-gray-500 text-sm">
+            No team members configured. Run{" "}
+            <code className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded text-xs font-mono">
+              chai team create
+            </code>{" "}
+            to set up your team.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function TeamView() {
+  const { activeSessionId, getSession } = useChatSessions();
+  const activeSession = activeSessionId ? getSession(activeSessionId) : undefined;
+
+  // If the active session has a team snapshot, show it
+  if (activeSession?.teamSnapshot) {
+    return <TeamGrid team={activeSession.teamSnapshot} sessionTitle={activeSession.title} />;
+  }
+
+  return <GlobalTeamView />;
+}
+
+function GlobalTeamView() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
@@ -97,22 +157,11 @@ export default function TeamView() {
   }
 
   const team = teams[0] ?? { name: "default", members: {} };
-  const members = team.members ?? {};
-  const memberCount = Object.keys(members).length;
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h2 className="text-2xl font-bold text-gray-900">Team Composition</h2>
-        <p className="text-gray-500 text-sm mt-1">
-          {memberCount > 0
-            ? `${memberCount} agent${memberCount !== 1 ? "s" : ""} configured`
-            : "No agents configured yet"}
-        </p>
-      </div>
+      <TeamGrid team={team} />
 
-      {/* Status badge */}
       {status && (
         <div className="inline-flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-4 py-2.5 shadow-sm">
           <Activity size={14} className="text-emerald-500" />
@@ -120,35 +169,6 @@ export default function TeamView() {
           <span className="text-sm font-semibold text-gray-900 capitalize">
             {(status.state as string) ?? "—"}
           </span>
-        </div>
-      )}
-
-      {/* Team grid */}
-      {memberCount > 0 ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-          {Object.entries(members).map(([role, info]) => {
-            const obj = typeof info === "object" && info ? info : {};
-            const prov = "provider" in obj && obj.provider != null ? String(obj.provider) : undefined;
-            const mod = "model" in obj && obj.model != null ? String(obj.model) : undefined;
-            return (
-              <RoleCard
-                key={role}
-                role={role}
-                provider={prov}
-                model={mod}
-              />
-            );
-          })}
-        </div>
-      ) : (
-        <div className="bg-white rounded-xl border border-gray-200 p-8 text-center shadow-sm">
-          <p className="text-gray-500 text-sm">
-            No team members configured. Run{" "}
-            <code className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded text-xs font-mono">
-              chai team create
-            </code>{" "}
-            to set up your team.
-          </p>
         </div>
       )}
     </div>

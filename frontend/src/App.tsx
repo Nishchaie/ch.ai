@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Routes, Route, NavLink, useNavigate, useParams } from "react-router-dom";
 import {
   Users,
@@ -11,6 +11,7 @@ import {
   Sparkles,
   MessageSquare,
   Trash2,
+  Terminal,
 } from "lucide-react";
 import TeamView from "./components/TeamView";
 import TaskBoard from "./components/TaskBoard";
@@ -18,18 +19,80 @@ import AgentConsole from "./components/AgentConsole";
 import PlanViewer from "./components/PlanViewer";
 import PlanDetail from "./components/PlanDetail";
 import QualityDashboard from "./components/QualityDashboard";
+import ConsoleOutput from "./components/ConsoleOutput";
 import { ChatSessionProvider, useChatSessions } from "./store/chatSessions";
 
 const NAV_ITEMS = [
-  { to: "/", icon: MessageSquare, label: "Console", exact: true },
+  { to: "/", icon: MessageSquare, label: "Chat", exact: true },
+  { to: "/console", icon: Terminal, label: "Console" },
   { to: "/team", icon: Users, label: "Team" },
   { to: "/tasks", icon: Kanban, label: "Tasks" },
   { to: "/plans", icon: FileText, label: "Plans" },
   { to: "/quality", icon: BarChart2, label: "Quality" },
 ];
 
+function EditableTitle({
+  value,
+  onSave,
+}: {
+  value: string;
+  onSave: (newTitle: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  const commit = () => {
+    setEditing(false);
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== value) {
+      onSave(trimmed);
+    } else {
+      setDraft(value);
+    }
+  };
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") { setDraft(value); setEditing(false); }
+        }}
+        onClick={(e) => e.stopPropagation()}
+        className="truncate flex-1 text-xs bg-gray-600 text-white rounded px-1 py-0.5 outline-none border border-gray-500 focus:border-emerald-400"
+      />
+    );
+  }
+
+  return (
+    <span
+      className="truncate flex-1 text-xs"
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        setDraft(value);
+        setEditing(true);
+      }}
+      title="Double-click to rename"
+    >
+      {value}
+    </span>
+  );
+}
+
 function ChatHistoryList({ collapsed }: { collapsed: boolean }) {
-  const { sessions, activeSessionId, deleteSession } = useChatSessions();
+  const { sessions, activeSessionId, deleteSession, updateSessionTitle } = useChatSessions();
   const navigate = useNavigate();
 
   if (sessions.length === 0 || collapsed) return null;
@@ -50,7 +113,10 @@ function ChatHistoryList({ collapsed }: { collapsed: boolean }) {
             }`}
             onClick={() => navigate(`/chat/${s.id}`)}
           >
-            <span className="truncate flex-1 text-xs">{s.title}</span>
+            <EditableTitle
+              value={s.title}
+              onSave={(newTitle) => updateSessionTitle(s.id, newTitle)}
+            />
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -183,6 +249,7 @@ function AppContent() {
         <Routes>
           <Route path="/" element={<AgentConsole />} />
           <Route path="/chat/:sessionId" element={<AgentConsole />} />
+          <Route path="/console" element={<PageWrapper><ConsoleOutput /></PageWrapper>} />
           <Route path="/team" element={<PageWrapper><TeamView /></PageWrapper>} />
           <Route path="/tasks" element={<PageWrapper><TaskBoard /></PageWrapper>} />
           <Route path="/plans" element={<PageWrapper><PlanViewer /></PageWrapper>} />

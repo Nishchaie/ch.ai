@@ -143,6 +143,12 @@ class ApiClient {
     return r.json();
   }
 
+  async getProjectDir(): Promise<string> {
+    const r = await fetch(`${BASE}/api/project-dir`);
+    const data = await r.json();
+    return data.project_dir;
+  }
+
   /**
    * WebSocket connection for streaming agent events.
    * Returns a function to disconnect.
@@ -152,13 +158,16 @@ class ApiClient {
     prompt: string,
     onEvent: (event: AgentEvent) => void,
     onDone?: () => void,
-    onError?: (err: string) => void
+    onError?: (err: string) => void,
+    projectDir?: string
   ): () => void {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
     const ws = new WebSocket(`${proto}//${host}${BASE}/api/teams/${encodeURIComponent(teamName)}/stream`);
+    const payload: Record<string, string> = { prompt };
+    if (projectDir) payload.project_dir = projectDir;
     ws.onopen = () => {
-      ws.send(JSON.stringify({ prompt }));
+      ws.send(JSON.stringify(payload));
     };
     ws.onmessage = (e) => {
       const evt = JSON.parse(e.data) as AgentEvent;

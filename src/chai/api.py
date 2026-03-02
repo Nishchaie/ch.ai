@@ -479,6 +479,12 @@ async def quality_scores() -> Dict:
         return {"overall": {"score": 0.0, "grade": "N/A"}}
 
 
+@app.get("/api/project-dir")
+async def project_dir_endpoint() -> Dict:
+    """Return the resolved project directory."""
+    return {"project_dir": _resolve_project_dir()}
+
+
 @app.get("/api/config")
 async def api_config() -> Dict:
     """Get current config (sanitized)."""
