@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import queue
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -15,6 +16,7 @@ from ..types import (
     AgentEvent,
     RoleType,
     TaskSpec,
+    TaskStatus,
     TeamConfig,
     TeamRunResult,
     TeamState,
@@ -23,6 +25,8 @@ from .agent import AgentRunner
 from .context import ContextManager
 from .role import RoleDefinition, RoleRegistry
 from .task import TaskDecomposer, TaskGraph
+
+logger = logging.getLogger(__name__)
 
 
 def _default_provider_factory(provider_type: str, model: Optional[str] = None) -> Provider:
@@ -84,12 +88,80 @@ class Team:
             "max_concurrent_agents": self._config.max_concurrent_agents,
         }
 
-    def run_task(self, prompt: str) -> Generator[AgentEvent, None, TeamRunResult]:
-        """Main flow: plan -> decompose -> execute (parallel) -> review."""
+    def run_direct(self, prompt: str, role: Optional[RoleType] = None) -> Generator[AgentEvent, None, TeamRunResult]:
+        """Fast path: skip decomposition, run a single agent immediately."""
+        events: list[AgentEvent] = []
+        start = time.monotonic()
+        result = ""
+        target_role = role or self._pick_best_role(prompt)
+        task = TaskSpec(
+            id="direct-1",
+            title=prompt,
+            description="",
+            role=target_role,
+        )
+
+        try:
+            self._state = TeamState.EXECUTING
+            yield AgentEvent(type="status", data={"phase": "executing", "mode": "direct"})
+
+            runner = self._make_runner(task)
+            started = AgentEvent(
+                type="status",
+                data={"task_started": task.id, "title": task.title},
+                role=task.role,
+                task_id=task.id,
+            )
+            events.append(started)
+            yield started
+
+            gen = runner.run(task)
+            try:
+                while True:
+                    evt = next(gen)
+                    events.append(evt)
+                    yield evt
+            except StopIteration as e:
+                result = e.value or ""
+
+            task.status = TaskStatus.COMPLETED if result else TaskStatus.FAILED
+            task.result = result
+
+            done_evt = AgentEvent(
+                type="status",
+                data={"task_completed": task.id},
+                role=task.role,
+                task_id=task.id,
+            )
+            events.append(done_evt)
+            yield done_evt
+
+            self._state = TeamState.DONE
+
+        except Exception as ex:
+            self._state = TeamState.FAILED
+            e = AgentEvent(type="error", data=str(ex))
+            events.append(e)
+            yield e
+
+        return TeamRunResult(
+            tasks=[task],
+            results={task.id: result},
+            duration_seconds=time.monotonic() - start,
+            events=events,
+        )
+
+    def run_task(
+        self,
+        prompt: str,
+        use_worktrees: bool = False,
+    ) -> Generator[AgentEvent, None, TeamRunResult]:
+        """Full flow: decompose -> execute (parallel, optionally in worktrees) -> review."""
         events: list[AgentEvent] = []
         start = time.monotonic()
         graph = TaskGraph()
         results: Dict[str, str] = {}
+        worktree_mgr = None
 
         try:
             self._state = TeamState.PLANNING
@@ -123,81 +195,144 @@ class Team:
                 for t in graph.all_tasks()
             ]})
 
-            self._state = TeamState.EXECUTING
-            yield AgentEvent(type="status", data={"phase": "executing"})
+            # Set up worktrees when requested and in a git repo
+            if use_worktrees:
+                worktree_mgr = self._init_worktrees(graph)
+                if worktree_mgr:
+                    yield AgentEvent(type="info", data={"worktrees": "enabled"})
 
-            max_workers = max(
-                1,
-                min(
-                    self._config.max_concurrent_agents,
-                    len(graph.all_tasks()),
-                ),
-            )
+            yield from self._execute_graph(graph, events, worktree_mgr)
 
-            event_queue: queue.Queue[AgentEvent] = queue.Queue()
+        except Exception as ex:
+            self._state = TeamState.FAILED
+            e = AgentEvent(type="error", data=str(ex))
+            events.append(e)
+            yield e
+        finally:
+            if worktree_mgr:
+                self._cleanup_worktrees(worktree_mgr, graph)
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                active_futures: Dict[Future, tuple[str, RoleType]] = {}
+        return TeamRunResult(
+            tasks=graph.all_tasks(),
+            results=results,
+            duration_seconds=time.monotonic() - start,
+            events=events,
+        )
 
-                while not graph.is_complete():
-                    ready = graph.get_ready_tasks()
-                    for task in ready:
-                        graph.mark_in_progress(task.id)
-                        runner = self._make_runner(task)
+    def run_graph(self, tasks: List[TaskSpec]) -> Generator[AgentEvent, None, TeamRunResult]:
+        """Execute a pre-built list of tasks (e.g. from a loaded plan), skipping decomposition."""
+        events: list[AgentEvent] = []
+        start = time.monotonic()
+        graph = TaskGraph()
 
-                        started = AgentEvent(
-                            type="status",
-                            data={"task_started": task.id, "title": task.title},
-                            role=task.role,
-                            task_id=task.id,
-                        )
-                        events.append(started)
-                        yield started
+        for task in tasks:
+            if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                graph.add_task(task)
+            else:
+                task.status = TaskStatus.PENDING
+                graph.add_task(task)
 
-                        future = executor.submit(
-                            self._run_and_stream, runner, task, event_queue
-                        )
-                        active_futures[future] = (task.id, task.role)
+        yield AgentEvent(type="info", data={"tasks": [
+            {
+                "id": t.id,
+                "title": t.title,
+                "role": t.role.value,
+                "status": t.status.value,
+                "dependencies": list(t.dependencies),
+                "description": t.description or "",
+            }
+            for t in graph.all_tasks()
+        ]})
 
-                    if not active_futures:
-                        break
+        try:
+            yield from self._execute_graph(graph, events)
+        except Exception as ex:
+            self._state = TeamState.FAILED
+            e = AgentEvent(type="error", data=str(ex))
+            events.append(e)
+            yield e
 
-                    while active_futures:
-                        # Drain queued events from worker threads
-                        while True:
-                            try:
-                                evt = event_queue.get_nowait()
-                                events.append(evt)
-                                yield evt
-                            except queue.Empty:
-                                break
+        results = {
+            t.id: (t.result or t.error or "")
+            for t in graph.all_tasks()
+            if t.status.value in ("completed", "failed")
+        }
 
-                        newly_done = [f for f in active_futures if f.done()]
-                        for future in newly_done:
-                            task_id, role = active_futures.pop(future)
-                            try:
-                                result = future.result()
-                                graph.mark_complete(task_id, result)
-                                done_evt = AgentEvent(
-                                    type="status",
-                                    data={"task_completed": task_id},
-                                    role=role,
-                                    task_id=task_id,
-                                )
-                                events.append(done_evt)
-                                yield done_evt
-                            except Exception as ex:
-                                graph.mark_failed(task_id, str(ex))
-                                e = AgentEvent(
-                                    type="error", data=str(ex), role=role, task_id=task_id
-                                )
-                                events.append(e)
-                                yield e
+        return TeamRunResult(
+            tasks=graph.all_tasks(),
+            results=results,
+            duration_seconds=time.monotonic() - start,
+            events=events,
+        )
 
-                        if active_futures and not newly_done:
-                            time.sleep(0.05)
+    # -- internal helpers --------------------------------------------------
 
-                    # Final drain after all futures in this batch are done
+    def _pick_best_role(self, prompt: str) -> RoleType:
+        """Heuristic: choose the best single role for a prompt."""
+        lower = prompt.lower()
+        if any(kw in lower for kw in ("test", "spec", "assert", "coverage")):
+            if RoleType.QA in self._config.members:
+                return RoleType.QA
+        if any(kw in lower for kw in ("component", "css", "tsx", "jsx", "react", "ui", "frontend", "page")):
+            if RoleType.FRONTEND in self._config.members:
+                return RoleType.FRONTEND
+        if any(kw in lower for kw in ("deploy", "docker", "ci", "cd", "pipeline", "infra")):
+            if RoleType.DEPLOYMENT in self._config.members:
+                return RoleType.DEPLOYMENT
+        if any(kw in lower for kw in ("prompt", "system message", "llm")):
+            if RoleType.PROMPT in self._config.members:
+                return RoleType.PROMPT
+        if RoleType.BACKEND in self._config.members:
+            return RoleType.BACKEND
+        return next(iter(self._config.members), RoleType.BACKEND)
+
+    def _execute_graph(
+        self,
+        graph: TaskGraph,
+        events: list[AgentEvent],
+        worktree_mgr: Optional[object] = None,
+    ) -> Generator[AgentEvent, None, None]:
+        """Shared execution loop for run_task and run_graph."""
+        self._state = TeamState.EXECUTING
+        yield AgentEvent(type="status", data={"phase": "executing"})
+
+        max_workers = max(
+            1,
+            min(
+                self._config.max_concurrent_agents,
+                len(graph.all_tasks()),
+            ),
+        )
+
+        event_queue: queue.Queue[AgentEvent] = queue.Queue()
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            active_futures: Dict[Future, tuple[str, RoleType]] = {}
+
+            while not graph.is_complete():
+                ready = graph.get_ready_tasks()
+                for task in ready:
+                    graph.mark_in_progress(task.id)
+                    runner = self._make_runner(task)
+
+                    started = AgentEvent(
+                        type="status",
+                        data={"task_started": task.id, "title": task.title},
+                        role=task.role,
+                        task_id=task.id,
+                    )
+                    events.append(started)
+                    yield started
+
+                    future = executor.submit(
+                        self._run_and_stream, runner, task, event_queue
+                    )
+                    active_futures[future] = (task.id, task.role)
+
+                if not active_futures:
+                    break
+
+                while active_futures:
                     while True:
                         try:
                             evt = event_queue.get_nowait()
@@ -206,28 +341,105 @@ class Team:
                         except queue.Empty:
                             break
 
-            self._state = TeamState.REVIEWING
-            yield AgentEvent(type="status", data={"phase": "reviewing"})
+                    newly_done = [f for f in active_futures if f.done()]
+                    for future in newly_done:
+                        task_id, role = active_futures.pop(future)
+                        try:
+                            result = future.result()
+                            graph.mark_complete(task_id, result)
+                            done_evt = AgentEvent(
+                                type="status",
+                                data={"task_completed": task_id},
+                                role=role,
+                                task_id=task_id,
+                            )
+                            events.append(done_evt)
+                            yield done_evt
+                        except Exception as ex:
+                            graph.mark_failed(task_id, str(ex))
+                            e = AgentEvent(
+                                type="error", data=str(ex), role=role, task_id=task_id
+                            )
+                            events.append(e)
+                            yield e
 
-            results = {
-                t.id: (t.result or t.error or "")
-                for t in graph.all_tasks()
-                if t.status.value in ("completed", "failed")
-            }
-            self._state = TeamState.DONE
+                    if active_futures and not newly_done:
+                        time.sleep(0.05)
 
-        except Exception as ex:
-            self._state = TeamState.FAILED
-            e = AgentEvent(type="error", data=str(ex))
-            events.append(e)
-            yield e
+                while True:
+                    try:
+                        evt = event_queue.get_nowait()
+                        events.append(evt)
+                        yield evt
+                    except queue.Empty:
+                        break
 
-        return TeamRunResult(
-            tasks=graph.all_tasks(),
-            results=results,
-            duration_seconds=time.monotonic() - start,
-            events=events,
-        )
+        # Merge worktree branches if applicable
+        if worktree_mgr:
+            self._merge_worktree_branches(graph)
+
+        self._state = TeamState.REVIEWING
+        yield AgentEvent(type="status", data={"phase": "reviewing"})
+
+        self._state = TeamState.DONE
+
+    def _init_worktrees(self, graph: TaskGraph) -> Optional[object]:
+        """Create per-task worktrees. Returns the WorktreeManager or None on failure."""
+        try:
+            from ..orchestration.worktree import WorktreeManager
+        except ImportError:
+            logger.warning("WorktreeManager not available, running in shared workspace")
+            return None
+
+        mgr = WorktreeManager(repo_path=self._project_dir)
+        try:
+            for task in graph.all_tasks():
+                wt_path = mgr.create_worktree(task.id)
+                task.worktree_path = wt_path
+            return mgr
+        except RuntimeError as exc:
+            logger.warning("Could not create worktrees (%s), falling back to shared workspace", exc)
+            for task in graph.all_tasks():
+                task.worktree_path = None
+            return None
+
+    def _merge_worktree_branches(self, graph: TaskGraph) -> None:
+        """Merge completed worktree branches back to the current branch."""
+        try:
+            from ..orchestration.merge import MergeManager
+            from ..orchestration.worktree import _sanitize_task_id
+        except ImportError:
+            return
+
+        merger = MergeManager(repo_path=self._project_dir)
+        try:
+            import subprocess
+            current_branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self._project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip() or "main"
+        except Exception:
+            current_branch = "main"
+
+        for task in graph.all_tasks():
+            if task.status == TaskStatus.COMPLETED and task.worktree_path:
+                branch_name = f"chai/{_sanitize_task_id(task.id)}"
+                try:
+                    merger.merge_branch(branch_name, current_branch)
+                except Exception as exc:
+                    logger.warning("Failed to merge branch %s: %s", branch_name, exc)
+
+    def _cleanup_worktrees(self, worktree_mgr: object, graph: TaskGraph) -> None:
+        """Remove worktrees after execution completes."""
+        try:
+            from ..orchestration.worktree import WorktreeManager
+            if isinstance(worktree_mgr, WorktreeManager):
+                worktree_mgr.cleanup_all()
+        except Exception as exc:
+            logger.warning("Worktree cleanup failed: %s", exc)
 
     def _make_runner(self, task: TaskSpec) -> AgentRunner:
         """Build an AgentRunner for the task's role, falling back to default provider."""
@@ -247,7 +459,8 @@ class Team:
                 system_prompt_template="{task}",
             )
         provider = self._provider_factory(ac.provider.value, ac.model)
-        tools = ToolRegistry(base_dir=self._project_dir, role=task.role)
+        base_dir = task.worktree_path or self._project_dir
+        tools = ToolRegistry(base_dir=base_dir, role=task.role)
         for name in self._tools.list_tools():
             t = self._tools.get(name)
             if t:

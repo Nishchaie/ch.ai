@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, Optional
 
 from ..config import ProjectConfig, get_config
 from ..providers.base import Provider
-from ..types import AgentConfig, AutonomyLevel, ProviderType, RoleType, TeamConfig, TeamRunResult
-from ..types import AgentEvent
+from ..types import AgentConfig, AgentEvent, AutonomyLevel, ProviderType, RoleType, TeamConfig, TeamRunResult
+from .router import ComplexityRouter, ExecutionStrategy
 from .team import Team
+
+logger = logging.getLogger(__name__)
 
 
 def _default_provider_factory(provider_type: str, model: Optional[str] = None) -> Provider:
@@ -32,6 +35,7 @@ class Harness:
         self._config = get_config()
         self._project_config = ProjectConfig.load(str(self._project_dir))
         self._provider_factory = provider_factory or _default_provider_factory
+        self._router = ComplexityRouter()
 
     def create_team(self, config: Optional[TeamConfig] = None) -> Team:
         """Create a team. Auto-configures from project if config not provided."""
@@ -49,10 +53,33 @@ class Harness:
         self,
         prompt: str,
         team_config: Optional[TeamConfig] = None,
+        strategy_override: Optional[ExecutionStrategy] = None,
     ) -> Generator[AgentEvent, None, TeamRunResult]:
-        """Run a prompt through a team. Yields events, returns TeamRunResult."""
+        """Run a prompt through complexity-based routing.
+
+        Routes to:
+          DIRECT       -> single agent, no decomposition
+          SMALL_TEAM   -> team decomposition, shared workspace
+          FULL_PIPELINE -> team decomposition with worktrees + merge
+        """
         team = self.create_team(team_config)
-        gen = team.run_task(prompt)
+
+        routing = self._router.classify(prompt)
+        strategy = strategy_override or routing.strategy
+        logger.info("Routing: %s (%s)", strategy.value, routing.reason)
+
+        yield AgentEvent(
+            type="info",
+            data={"routing": strategy.value, "reason": routing.reason},
+        )
+
+        if strategy == ExecutionStrategy.DIRECT:
+            gen = team.run_direct(prompt)
+        elif strategy == ExecutionStrategy.FULL_PIPELINE:
+            gen = team.run_task(prompt, use_worktrees=True)
+        else:
+            gen = team.run_task(prompt, use_worktrees=False)
+
         result: Optional[TeamRunResult] = None
         try:
             while True:

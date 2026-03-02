@@ -150,9 +150,16 @@ class AgentRunner:
             messages.append(self._provider.format_assistant_message(response))
             tool_results: List[Dict[str, Any]] = []
 
+            calls = [
+                {"name": tc.name, "arguments": tc.arguments}
+                for tc in response.tool_calls
+            ]
             for tc in response.tool_calls:
                 yield AgentEvent(type="tool_call", data={"name": tc.name, "args": tc.arguments}, role=self._role.role_type, task_id=task.id)
-                tr = self._tools.execute(tc.name, tc.arguments)
+
+            exec_results = self._tools.execute_parallel(calls)
+
+            for tc, tr in zip(response.tool_calls, exec_results):
                 yield AgentEvent(type="tool_result", data={"success": tr.success, "output": tr.output}, role=self._role.role_type, task_id=task.id)
                 tool_results.append(self._provider.format_tool_result(tc.id, tr.output if tr.success else f"Error: {tr.error or tr.output}"))
 

@@ -432,19 +432,27 @@ def plan_run(path: str) -> None:
     cfg = get_config()
     factory = lambda p, m: _provider_factory(p, m)
     harness = Harness(provider_factory=factory)
-    team = harness.create_team()
+    team_inst = harness.create_team()
     ui = TerminalUI()
     ui.print_welcome(cfg.default_provider, cfg.default_model)
-    gen = team.run_graph(tasks)
+    gen = team_inst.run_graph(tasks)
+    result = None
     ui.start_activity("Starting\u2026")
     try:
         while True:
             evt = next(gen)
             ui.print_event(evt)
-    except StopIteration:
-        pass
+    except StopIteration as e:
+        result = e.value
     finally:
         ui.stop_activity()
+
+    if result:
+        status_map = {
+            t.id: t.status.value for t in result.tasks
+        }
+        mgr.update_plan_status(path, status_map)
+
     Console().print("\n[green]Done.[/green]")
 
 
