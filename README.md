@@ -18,7 +18,7 @@ What's different: ch.ai is a harness you run locally or in CI. You configure whi
 ### 1. Clone and set up a virtual environment
 
 ```bash
-git clone https://github.com/yourorg/ch.ai.git
+git clone git@github.com:Nishchaie/ch.ai.git
 cd ch.ai
 ```
 
@@ -70,7 +70,7 @@ chai config set keys.anthropic_api "sk-ant-..."
 export OPENAI_API_KEY="sk-..."
 chai config set keys.openai_api "sk-..."
 chai config set default_provider openai_api
-chai config set default_model gpt-5.2
+chai config set default_model gpt-5.2          # or gpt-5.2-codex
 ```
 
 **Option D -- Bring Your Own Model (any OpenAI-compatible API):**
@@ -107,32 +107,40 @@ See `docs/architecture-diagram.md` for full Mermaid diagrams exportable to SVG.
 
 ```mermaid
 flowchart TB
-    User([User]) --> CLI[CLI]
+    User([User]) --> CLI[CLI / Web UI]
     CLI --> Harness[Harness]
     Harness --> Lead[Team Lead]
     Lead --> TaskGraph[TaskGraph DAG]
     TaskGraph --> FE[Frontend]
     TaskGraph --> BE[Backend]
+    TaskGraph --> Prompt[Prompt Engineer]
+    TaskGraph --> Researcher[Researcher]
     TaskGraph --> QA[QA]
+    TaskGraph --> Deploy[Deployment]
     FE --> Providers[Provider Layer]
     BE --> Providers
+    Prompt --> Providers
+    Researcher --> Providers
     QA --> Providers
+    Deploy --> Providers
     Providers --> ClaudeCode[Claude Code CLI]
     Providers --> Codex[Codex CLI]
-    Providers --> API[Direct API / BYOM]
+    Providers --> AnthropicAPI[Anthropic API]
+    Providers --> OpenAIAPI[OpenAI API]
+    Providers --> Custom[BYOM]
 ```
 
 ## Team Roles
 
-| Role | Description | Autonomy | Context Scope |
-|------|-------------|----------|---------------|
-| Lead | Decomposes prompts into task DAG, coordinates, reviews | High | Full project |
-| Frontend | UI, components, styling, browser testing | Medium | UI files (`*.tsx`, `*.css`, `components/`) |
-| Backend | APIs, data models, server-side logic | Medium | Server files (`*.py`, `api/`, `models/`) |
-| Prompt | System prompts, AGENTS.md, golden principles | Medium | Docs and config |
-| Researcher | Search, docs review, tradeoff analysis | Read-only | Full project (no writes) |
-| QA | Tests, lint, validation, bug reproduction | Medium | Tests and recent changes |
-| Deployment | CI/CD, Docker, deployment scripts, monitoring | Medium | Infra and config files |
+| Role | Description | Autonomy | Tools | Context Scope |
+|------|-------------|----------|-------|---------------|
+| Lead | Decomposes prompts into task DAG, coordinates, reviews | High | All | Full project (`*.md`, `docs/`, `AGENTS.md`) |
+| Frontend | UI, components, styling, client-side logic | Medium | All | `*.tsx`, `*.ts`, `*.jsx`, `*.js`, `frontend/`, `components/` |
+| Backend | APIs, data models, server-side logic | Medium | All | `*.py`, `api*.py`, `models/`, `src/` |
+| Prompt | Prompt engineering, LLM integration, AGENTS.md | Medium | Read, write, edit, grep, search | `*prompt*`, `prompts/`, `templates/` |
+| Researcher | Search, docs review, tradeoff analysis | Medium | Read-only + search | `*.md`, `docs/`, `references/` |
+| QA | Tests, lint, validation, bug reproduction | Medium | Read, write, edit, shell, browser, review | `test*.py`, `*_test.*`, `tests/`, `*.py` |
+| Deployment | CI/CD, Docker, deployment scripts, monitoring | Medium | All | `Dockerfile*`, `.github/`, `Makefile`, `pyproject.toml` |
 
 Roles are extensible via `RoleRegistry`. Add custom roles like `SecurityEngineer`, `DataEngineer`, or `MLEngineer` with their own tool access, system prompt, and autonomy level.
 
@@ -141,8 +149,8 @@ Roles are extensible via `RoleRegistry`. Add custom roles like `SecurityEngineer
 | Command | Description |
 |---------|-------------|
 | `chai init` | Initialize project: creates `chai.yaml`, `AGENTS.md`, `docs/` structure |
-| `chai run <prompt>` | Run a full team on a task |
-| `chai agent --role <role> <prompt>` | Run a single agent with a specific role |
+| `chai run <prompt>` | Run a full team on a task (`-p` provider, `-m` model, `--max-agents`) |
+| `chai agent --role <role> <prompt>` | Run a single agent with a specific role (`-p` provider, `-m` model) |
 | `chai team create` | Interactive team creation |
 | `chai team status` | Show current team status |
 | `chai plan create <prompt>` | Create an execution plan |
@@ -152,7 +160,7 @@ Roles are extensible via `RoleRegistry`. Add custom roles like `SecurityEngineer
 | `chai config set <key> <value>` | Set a config value |
 | `chai quality` | Show quality scores per domain |
 | `chai garden` | Run the doc gardener (find stale docs, broken links) |
-| `chai api` | Start the FastAPI server for the web frontend |
+| `chai api` | Start the FastAPI server for the web frontend (`--host`, `--port`, `-d` project dir) |
 | `chai interactive` | Interactive REPL with `/team`, `/plan`, `/quality`, `/help` |
 
 ## Configuration
@@ -173,7 +181,7 @@ team:
       provider: claude_code
     backend:
       provider: anthropic_api
-      model: claude-sonnet-4-5-20250929
+      model: claude-sonnet-4-6
     qa:
       provider: claude_code
 
@@ -195,7 +203,29 @@ self_improvement:
 
 ### ~/.chai/config.json (global)
 
-Stores `default_provider`, `default_model`, `theme`, API `keys`, `max_concurrent_agents`, and custom provider settings. Managed via `chai config set`.
+Stores global settings. Managed via `chai config set`.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `default_provider` | `claude_code` | Provider used when not overridden per-role |
+| `default_model` | `claude-sonnet-4-6` | Model used when not specified |
+| `theme` | `default` | Terminal UI theme |
+| `verbose` | `false` | Verbose output |
+| `keys` | `{}` | API keys per provider (`anthropic_api`, `openai_api`) |
+| `max_concurrent_agents` | `4` | Max parallel agents |
+| `custom_base_url` | -- | Base URL for BYOM provider |
+| `custom_model` | -- | Model name for BYOM provider |
+
+Context compaction settings (automatic summarization when nearing token limits):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `context_compact_threshold` | `0.8` | Fraction of context window that triggers compaction |
+| `context_keep_head_ratio` | `0.2` | Fraction of context preserved from the start |
+| `context_keep_tail_ratio` | `0.2` | Fraction of context preserved from the end |
+| `context_compact_cooldown_messages` | `8` | Min messages between compactions |
+| `context_compact_min_messages` | `12` | Min messages before compaction can trigger |
+| `context_reserved_output_tokens` | `8192` | Tokens reserved for model output |
 
 ## Building a Complex Project
 
@@ -361,11 +391,12 @@ The web dashboard provides real-time team status, a kanban task board, live agen
 
 | Component | Purpose |
 |-----------|---------|
+| AgentConsole | Chat-style console with prompt input, live agent events, and tool call display |
 | TeamView | Role cards with provider, model, and active/idle status |
 | TaskBoard | Kanban columns: Pending, In Progress, Reviewing, Completed, Failed |
-| AgentConsole | Live streaming agent output via WebSocket, color-coded by role |
-| PlanViewer | Browse and track execution plans |
-| QualityDashboard | Quality scores per domain with progress indicators |
+| PlanViewer / PlanDetail | Browse execution plans and drill into task details |
+| QualityDashboard | Quality scores per domain with grade styling |
+| ActivityBanner | Phase indicator (planning, executing, reviewing) during runs |
 
 ```bash
 # Terminal 1 -- start the API server
@@ -400,15 +431,18 @@ src/chai/
   core/           Team engine: harness, team, roles, agents, tasks, context
   providers/      Model providers: Claude Code, Codex, Anthropic API, OpenAI API, BYOM
   tools/          Agent tools: filesystem, grep, shell, browser, review, search
-  orchestration/  Coordination: scheduling, planning, feedback loops, validation
+  orchestration/  Coordination: scheduling, planning, feedback loops, merge, worktrees, validation
   knowledge/      Repository knowledge: scanning, AGENTS.md, doc gardening
-  quality/        Enforcement: golden principles, quality scoring, linting
+  quality/        Enforcement: golden principles, quality scoring, linting, garbage collection
   sessions/       Persistence: SQLite sessions, history, context compaction
   ui/             Terminal UI: rich output, dashboard, themes
-  cli.py          CLI entry point
-  api.py          FastAPI server
+  cli.py          CLI entry point (click)
+  api.py          FastAPI server for the web frontend
+  config.py       Global (~/.chai/config.json) and per-project (chai.yaml) configuration
+  state.py        Runtime state management
+  types.py        Shared types, enums, and Pydantic models
 frontend/         React/TypeScript web dashboard
-docs/             System of record: design docs, exec plans, golden principles
+docs/             System of record: design docs, exec plans, golden principles, references
 tests/            Test suite (mirrors src/ structure)
 ```
 
