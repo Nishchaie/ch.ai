@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
+import re
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Dict, Generator, List, Optional
 
 from ..config import ProjectConfig
-from ..providers.base import Provider
+from ..providers.base import Provider, ProviderResponse
 from ..tools import get_default_tools
 from ..tools.base import ToolRegistry
 from ..types import (
@@ -192,8 +194,8 @@ class Team:
             self._state = TeamState.PLANNING
             yield AgentEvent(type="status", data={"phase": "planning"})
 
-            if use_worktrees:
-                self._clarify_stack()
+            self._clarify_stack()
+            prompt = self._clarify_requirements(prompt)
 
             lead_config = self._config.members.get(RoleType.LEAD)
             if not lead_config:
@@ -296,30 +298,124 @@ class Team:
     # -- internal helpers --------------------------------------------------
 
     def _clarify_stack(self) -> None:
-        """Ask the operator about tech stack when not explicitly configured."""
+        """Auto-default tech stack. Only rebuilds roles when chai.yaml overrides."""
         stack = self._project_config.stack
         if stack._explicit:
             return
-        role_questions = {
-            RoleType.FRONTEND: ("frontend stack", "frontend"),
-            RoleType.BACKEND: ("backend stack", "backend"),
-            RoleType.QA: ("testing stack", "qa"),
-            RoleType.DEPLOYMENT: ("deployment stack", "deployment"),
-        }
-        changed = False
-        for role, (label, attr) in role_questions.items():
-            if role in self._config.members:
-                current = getattr(stack, attr)
+        logger.info(
+            "Using default stack: frontend=%s, backend=%s, qa=%s, deploy=%s",
+            stack.frontend, stack.backend, stack.qa, stack.deployment,
+        )
+
+    _CLARIFY_REQUIREMENTS_PROMPT = """\
+You are a product requirements analyst. Given a user's project request, identify \
+ambiguous or missing product details that would significantly affect implementation.
+
+Focus ONLY on product and business concerns:
+- Core user flows and features
+- Data model and entities
+- Authentication and authorization model
+- Key integrations or external dependencies
+- Scope boundaries (what's in vs out of v1)
+
+Do NOT ask about:
+- Tech stack, frameworks, or languages
+- Tooling, CI/CD, or infrastructure
+- Code style or architecture patterns
+
+Rules:
+- Generate at most 5 questions, fewer if the prompt is clear.
+- Each question must have a sensible default answer the team can use if the user \
+doesn't respond.
+- If the request is already clear enough to start, return an empty questions list.
+- Be concise. One sentence per question.
+
+Respond with ONLY a JSON object, no markdown fences:
+{"questions": [{"question": "...", "default": "...", "field": "..."}]}
+
+field is a short snake_case key identifying the topic (e.g. "auth_model", "user_roles")."""
+
+    def _clarify_requirements(self, prompt: str) -> str:
+        """Use LLM to surface ambiguous product requirements and ask the operator.
+
+        Returns the original prompt enriched with clarification context, or the
+        original prompt unchanged if no clarifications are needed / auto mode.
+        """
+        if self._clarify is default_clarify:
+            return prompt
+
+        lead_config = self._config.members.get(RoleType.LEAD)
+        if not lead_config:
+            return prompt
+
+        try:
+            provider = self._provider_factory(
+                lead_config.provider.value, lead_config.model
+            )
+            raw = provider.chat(
+                messages=[{"role": "user", "content": prompt}],
+                system=self._CLARIFY_REQUIREMENTS_PROMPT,
+                tools=None,
+                max_tokens=1024,
+                stream=False,
+            )
+
+            response: ProviderResponse
+            if isinstance(raw, Generator):
+                try:
+                    while True:
+                        next(raw)
+                except StopIteration as e:
+                    response = e.value if e.value else ProviderResponse(text="")
+            else:
+                response = raw
+
+            questions = self._parse_clarify_json(response.text)
+            if not questions:
+                return prompt
+
+            answers: list[str] = []
+            for q in questions:
                 answer = self._clarify(
-                    f"What {label} does this project use?",
-                    current,
-                    f"stack.{attr}",
+                    q["question"],
+                    q.get("default", ""),
+                    q.get("field", ""),
                 )
-                if answer != current:
-                    setattr(stack, attr, answer)
-                    changed = True
-        if changed:
-            self._role_registry = RoleRegistry(stack)
+                answers.append(f"- {q['question']} {answer}")
+
+            clarifications = "\n".join(answers)
+            return (
+                f"{prompt}\n\n"
+                f"Additional clarifications from the user:\n{clarifications}"
+            )
+        except Exception as exc:
+            logger.warning("Product clarification step failed, proceeding without: %s", exc)
+            return prompt
+
+    @staticmethod
+    def _parse_clarify_json(text: str) -> list[dict]:
+        """Extract questions list from the model's JSON response."""
+        text = text.strip()
+        try:
+            data = json.loads(text)
+            return data.get("questions", [])
+        except json.JSONDecodeError:
+            pass
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if match:
+            try:
+                data = json.loads(match.group(1).strip())
+                return data.get("questions", [])
+            except json.JSONDecodeError:
+                pass
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+                return data.get("questions", [])
+            except json.JSONDecodeError:
+                pass
+        return []
 
     def _pick_best_role(self, prompt: str) -> RoleType:
         """Heuristic: choose the best single role for a prompt."""

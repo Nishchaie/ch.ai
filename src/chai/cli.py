@@ -26,6 +26,7 @@ from .types import (
     TeamConfig,
     TeamRunResult,
     TaskStatus,
+    default_clarify,
 )
 
 
@@ -169,7 +170,7 @@ def _handle_incremental_state(evt: "AgentEvent", prompt: str) -> None:
         update_task_status(evt.task_id, "failed")
 
 
-def _init_project(project_dir: Path) -> None:
+def _init_project(project_dir: Path, auto: bool = False) -> None:
     """Initialize project: chai.yaml, AGENTS.md, docs structure. Inline when knowledge modules unavailable."""
     # Try knowledge modules first
     try:
@@ -191,13 +192,19 @@ def _init_project(project_dir: Path) -> None:
 
     chai_yaml = project_dir / "chai.yaml"
     if not chai_yaml.exists():
-        console = Console()
-        console.print("\n[bold]Configure your project tech stack[/bold]")
-        console.print("[dim]Press Enter to accept defaults, or type your own.[/dim]\n")
-        fe = Prompt.ask("  Frontend", default="React, TypeScript")
-        be = Prompt.ask("  Backend", default="Python, FastAPI")
-        qa_s = Prompt.ask("  Testing", default="pytest")
-        deploy = Prompt.ask("  Deployment", default="Docker")
+        fe = "React, TypeScript"
+        be = "Python, FastAPI"
+        qa_s = "pytest"
+        deploy = "Python venv + npm dev"
+
+        if not auto:
+            console = Console()
+            console.print("\n[bold]Configure your project tech stack[/bold]")
+            console.print("[dim]Press Enter to accept defaults, or type your own.[/dim]\n")
+            fe = Prompt.ask("  Frontend", default=fe)
+            be = Prompt.ask("  Backend", default=be)
+            qa_s = Prompt.ask("  Testing", default=qa_s)
+            deploy = Prompt.ask("  Deployment", default=deploy)
 
         chai_yaml.write_text(f"""# ch.ai project configuration
 # See README for full reference
@@ -278,10 +285,12 @@ def cli(ctx: click.Context, verbose: bool) -> None:
 
 
 @cli.command()
-def init() -> None:
+@click.option("--auto", "auto_mode", is_flag=True, default=False,
+              help="Skip all prompts, use system defaults")
+def init(auto_mode: bool) -> None:
     """Initialize project: chai.yaml, AGENTS.md, docs structure."""
     project_dir = Path.cwd()
-    _init_project(project_dir)
+    _init_project(project_dir, auto=auto_mode)
     Console().print("[green]Project initialized.[/green]")
 
 
@@ -290,7 +299,9 @@ def init() -> None:
 @click.option("--provider", "-p", default=None, help="Provider (claude_code, anthropic_api, codex)")
 @click.option("--model", "-m", default=None, help="Model name")
 @click.option("--max-agents", type=int, default=None, help="Max concurrent agents")
-def run(prompt: str, provider: Optional[str], model: Optional[str], max_agents: Optional[int]) -> None:
+@click.option("--auto", "auto_mode", is_flag=True, default=False,
+              help="Skip all clarifications, use system defaults")
+def run(prompt: str, provider: Optional[str], model: Optional[str], max_agents: Optional[int], auto_mode: bool) -> None:
     """Run a team on a task."""
     cfg = get_config()
     provider = provider or cfg.default_provider
@@ -329,7 +340,8 @@ def run(prompt: str, provider: Optional[str], model: Optional[str], max_agents: 
         global _active_ui
         _active_ui = ui
         factory = lambda p, m: _provider_factory(p, m)
-        harness = Harness(provider_factory=factory, clarify=_cli_clarify)
+        clarify_fn = default_clarify if auto_mode else _cli_clarify
+        harness = Harness(provider_factory=factory, clarify=clarify_fn)
         gen = harness.run(prompt, cancel_event=cancel_event)
         result = None
         event_count = 0

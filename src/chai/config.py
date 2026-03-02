@@ -65,7 +65,7 @@ class StackConfig:
     frontend: str = "React, TypeScript"
     backend: str = "Python, FastAPI"
     qa: str = "pytest"
-    deployment: str = "Docker"
+    deployment: str = "Python venv + npm dev"
     prompt: str = ""
     researcher: str = ""
     _explicit: bool = False
@@ -141,7 +141,7 @@ class ProjectConfig:
                 frontend=s.get("frontend", "React, TypeScript"),
                 backend=s.get("backend", "Python, FastAPI"),
                 qa=s.get("qa", "pytest"),
-                deployment=s.get("deployment", "Docker"),
+                deployment=s.get("deployment", "Python venv + npm dev"),
                 prompt=s.get("prompt", ""),
                 researcher=s.get("researcher", ""),
                 _explicit=True,

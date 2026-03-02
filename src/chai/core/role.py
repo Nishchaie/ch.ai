@@ -74,7 +74,7 @@ Task: {{task}}
 Focus on: {stack}, unit tests, integration tests, linting, acceptance criteria validation. Use the provided context files."""
 
 
-def _deployment_prompt(stack: str = "Docker") -> str:
+def _deployment_prompt(stack: str = "Python venv + npm dev") -> str:
     return f"""You are the Deployment specialist. You handle build, release, infrastructure, and CI/CD.
 
 Task: {{task}}

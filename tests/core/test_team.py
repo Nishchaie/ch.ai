@@ -79,28 +79,23 @@ class TestTeam:
 
 
 class TestClarifyStack:
-    """Test the _clarify_stack mechanism."""
+    """Test the _clarify_stack mechanism (auto-defaults, no interactive prompts)."""
 
     def test_clarify_skipped_when_explicit(self) -> None:
-        """When stack._explicit is True, clarify callback is never called."""
+        """When stack._explicit is True, defaults are not logged."""
         stack = StackConfig(frontend="Vue 3", _explicit=True)
         pc = ProjectConfig(stack=stack)
         config = TeamConfig(
             name="test",
             members={RoleType.FRONTEND: AgentConfig(role=RoleType.FRONTEND)},
         )
-        calls: list[str] = []
-
-        def spy_clarify(question: str, default: str = "", field: str = "") -> str:
-            calls.append(field)
-            return default
-
-        team = Team(config=config, project_config=pc, clarify=spy_clarify)
+        team = Team(config=config, project_config=pc)
         team._clarify_stack()
-        assert calls == [], "Clarify should not fire when stack is explicit"
+        # Explicit stacks are used as-is; no error raised
+        assert pc.stack.frontend == "Vue 3"
 
-    def test_clarify_fires_when_not_explicit(self) -> None:
-        """When stack._explicit is False, clarify is called for each team role."""
+    def test_auto_defaults_when_not_explicit(self) -> None:
+        """When stack._explicit is False, defaults are used silently (no clarify calls)."""
         pc = ProjectConfig()
         config = TeamConfig(
             name="test",
@@ -117,25 +112,6 @@ class TestClarifyStack:
 
         team = Team(config=config, project_config=pc, clarify=spy_clarify)
         team._clarify_stack()
-        assert "stack.frontend" in calls
-        assert "stack.backend" in calls
-
-    def test_clarify_updates_prompts_on_change(self) -> None:
-        """When the user provides different values, role prompts get rebuilt."""
-        pc = ProjectConfig()
-        config = TeamConfig(
-            name="test",
-            members={RoleType.FRONTEND: AgentConfig(role=RoleType.FRONTEND)},
-        )
-
-        def override_clarify(question: str, default: str = "", field: str = "") -> str:
-            if field == "stack.frontend":
-                return "Svelte, TypeScript"
-            return default
-
-        team = Team(config=config, project_config=pc, clarify=override_clarify)
-        team._clarify_stack()
-
-        fe = team._role_registry.get_role(RoleType.FRONTEND)
-        assert "Svelte" in fe.system_prompt_template
-        assert "React" not in fe.system_prompt_template
+        assert calls == [], "Stack clarify should not prompt; defaults are used silently"
+        assert pc.stack.frontend == "React, TypeScript"
+        assert pc.stack.backend == "Python, FastAPI"
