@@ -13,7 +13,7 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-ROUTER_MODEL = "claude-3-5-haiku-20241022"
+ROUTER_MODEL = "claude-haiku-4-5"
 
 
 class ExecutionStrategy(str, Enum):
@@ -94,13 +94,13 @@ class ComplexityRouter:
         try:
             return self._classify_api(prompt)
         except Exception as exc:
-            logger.debug("API routing unavailable: %s", exc)
+            logger.warning("API routing unavailable: %s", exc)
 
         # Fall back to Claude Code CLI
         try:
             return self._classify_cli(prompt)
         except Exception as exc:
-            logger.debug("CLI routing unavailable: %s", exc)
+            logger.warning("CLI routing unavailable: %s", exc)
 
         # Last resort: simple heuristic
         logger.warning("LLM routing unavailable, using fallback heuristic")
@@ -162,16 +162,31 @@ class ComplexityRouter:
         return _parse_routing_json(result.stdout)
 
     def _classify_fallback(self, prompt: str) -> RoutingResult:
-        """Dead-simple fallback when neither API nor CLI is available."""
+        """Keyword-based fallback when neither API nor CLI is available."""
         words = prompt.lower().split()
+        word_set = set(words)
         build_verbs = {"build", "create", "implement", "design", "develop", "make", "write"}
+        scale_words = {
+            "replica", "clone", "app", "application", "software", "platform",
+            "system", "website", "product", "full", "complete", "entire",
+            "saas", "dashboard", "portal",
+        }
 
-        if len(words) <= 10 and not (build_verbs & set(words)):
+        has_build = bool(build_verbs & word_set)
+        has_scale = bool(scale_words & word_set)
+
+        if not has_build and len(words) <= 10:
             return RoutingResult(
                 strategy=ExecutionStrategy.DIRECT,
                 reason="Short prompt without build intent (fallback)",
             )
-        if build_verbs & set(words):
+        if has_build and has_scale:
+            return RoutingResult(
+                strategy=ExecutionStrategy.FULL_PIPELINE,
+                reason="Build-at-scale detected (fallback)",
+                suggested_roles=["lead", "frontend", "backend", "qa"],
+            )
+        if has_build:
             return RoutingResult(
                 strategy=ExecutionStrategy.SMALL_TEAM,
                 reason="Build-intent detected (fallback)",

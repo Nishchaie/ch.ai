@@ -90,7 +90,7 @@ class TestCLIRouting:
         mock_run.return_value = _mock_cli_result("direct", "Simple fix")
         router.classify("fix a typo")
         args = mock_run.call_args[0][0]
-        assert any("claude-3-5-haiku" in a for a in args)
+        assert any("claude-haiku-4-5" in a for a in args)
 
 
 class TestFallbackHeuristic:
@@ -106,8 +106,15 @@ class TestFallbackHeuristic:
         assert result.strategy == ExecutionStrategy.DIRECT
 
     def test_build_verb_small_team(self, router: ComplexityRouter) -> None:
-        result = self._classify_with_heuristic(router, "build a new dashboard")
+        result = self._classify_with_heuristic(router, "build a new login page")
         assert result.strategy == ExecutionStrategy.SMALL_TEAM
+
+    def test_build_at_scale_full_pipeline(self, router: ComplexityRouter) -> None:
+        result = self._classify_with_heuristic(
+            router, "build me a replica of workday the hr software"
+        )
+        assert result.strategy == ExecutionStrategy.FULL_PIPELINE
+        assert result.suggested_roles is not None
 
     def test_long_prompt_small_team(self, router: ComplexityRouter) -> None:
         result = self._classify_with_heuristic(
