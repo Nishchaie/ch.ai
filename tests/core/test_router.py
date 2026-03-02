@@ -274,6 +274,23 @@ class TestFallbackHeuristic:
         assert result.strategy == ExecutionStrategy.FULL_PIPELINE
         assert result.suggested_roles is not None
 
+    def test_build_modern_version_full_pipeline(self) -> None:
+        result = self._router()._classify_fallback(
+            "build me a mordern version of workday, it should be snappy, "
+            "the UI theme should be like chatGPT, there should be a search bar "
+            "like chat gpt on the homepage, to answer action all the things, "
+            "and also all the tradional flows"
+        )
+        assert result.strategy == ExecutionStrategy.FULL_PIPELINE
+
+    def test_long_build_with_many_features_full_pipeline(self) -> None:
+        result = self._router()._classify_fallback(
+            "create a project management tool with kanban boards, "
+            "time tracking, team collaboration, notifications, "
+            "and a mobile responsive dashboard with dark mode"
+        )
+        assert result.strategy == ExecutionStrategy.FULL_PIPELINE
+
     def test_long_prompt_small_team(self) -> None:
         result = self._router()._classify_fallback(
             "add a search endpoint to the API that filters users by name and returns paginated results"

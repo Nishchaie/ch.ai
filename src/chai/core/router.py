@@ -32,7 +32,8 @@ ROUTER_MODELS = {
     "cli": "haiku",
 }
 
-_CLI_TIMEOUT = 15
+_CLI_STARTUP_TIMEOUT = 25  # seconds to wait for the first CLI event (cold boot)
+_CLI_RESULT_TIMEOUT = 15   # seconds after first event to wait for the result
 
 _CLI_WARMUP_CMD = [
     "claude", "--version", "--strict-mcp-config",
@@ -318,13 +319,32 @@ class ComplexityRouter:
                 pass
 
     def _read_cli_stream(self, proc: subprocess.Popen) -> RoutingResult:
-        """Read stream-json events from the CLI, extract the assistant message."""
+        """Read stream-json events from the CLI, extract the assistant message.
+
+        Uses a two-phase timeout so the CLI's cold-boot time (Node.js +
+        auth + MCP init) doesn't eat into the window for the actual LLM
+        response:
+          Phase 1: up to ``_CLI_STARTUP_TIMEOUT`` for the first event.
+          Phase 2: up to ``_CLI_RESULT_TIMEOUT`` after the first event.
+        """
         t0 = time.monotonic()
+        first_event_at: Optional[float] = None
         assistant_text = ""
 
         for line in proc.stdout:
-            if time.monotonic() - t0 > _CLI_TIMEOUT:
-                raise TimeoutError(f"CLI stream exceeded {_CLI_TIMEOUT}s")
+            now = time.monotonic()
+
+            if first_event_at is None:
+                if now - t0 > _CLI_STARTUP_TIMEOUT:
+                    raise TimeoutError(
+                        f"CLI produced no events within {_CLI_STARTUP_TIMEOUT}s"
+                    )
+                first_event_at = now
+            else:
+                if now - first_event_at > _CLI_RESULT_TIMEOUT:
+                    raise TimeoutError(
+                        f"CLI stream exceeded {_CLI_RESULT_TIMEOUT}s after first event"
+                    )
 
             line = line.strip()
             if not line:
@@ -367,10 +387,13 @@ class ComplexityRouter:
             "replica", "clone", "app", "application", "software", "platform",
             "system", "website", "product", "full", "complete", "entire",
             "saas", "dashboard", "portal", "marketplace", "e-commerce",
+            "version", "modern", "ui", "theme", "homepage",
+            "landing", "workspace", "service", "tool", "suite",
         }
         multi_domain = {
             "frontend", "backend", "database", "api", "deploy", "ci", "cd",
-            "docker", "kubernetes", "infra", "migration",
+            "docker", "kubernetes", "infra", "migration", "auth",
+            "authentication", "billing", "search", "test", "tests",
         }
 
         has_build = bool(build_verbs & word_set) or re.search(
@@ -379,12 +402,19 @@ class ComplexityRouter:
         has_scale = bool(scale_words & word_set)
         domain_count = len(multi_domain & word_set)
 
+        like_pattern = re.search(r"\blike\s+(a\s+)?\w+", lower)
+        if like_pattern:
+            has_scale = True
+
+        feature_count = lower.count(",") + lower.count(" and ") + lower.count("should")
+        is_long_build = has_build and len(words) >= 20
+
         if not has_build and len(words) <= 10:
             return RoutingResult(
                 strategy=ExecutionStrategy.DIRECT,
                 reason="Short prompt without build intent (fallback)",
             )
-        if has_build and (has_scale or domain_count >= 2):
+        if has_build and (has_scale or domain_count >= 2 or is_long_build or feature_count >= 3):
             return RoutingResult(
                 strategy=ExecutionStrategy.FULL_PIPELINE,
                 reason="Build-at-scale detected (fallback)",
