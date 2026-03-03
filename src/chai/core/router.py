@@ -178,7 +178,7 @@ class ComplexityRouter:
                 _CLI_WARMUP_CMD,
                 stdin=_DEVNULL,
                 capture_output=True,
-                timeout=_CLI_TIMEOUT,
+                timeout=_CLI_STARTUP_TIMEOUT,
             )
         except Exception:
             pass
@@ -281,12 +281,13 @@ class ComplexityRouter:
         return _parse_routing_json(text)
 
     def _classify_cli(self, prompt: str) -> RoutingResult:
-        """Route via Claude Code CLI using streaming JSON.
+        """Route via ``claude --print``, capturing plain-text output.
 
-        Uses ``Popen`` + ``stream-json`` so output is flushed per-event
-        (the CLI hangs on cleanup with ``--output-format=text``).  We
-        kill the process as soon as the ``result`` event arrives.
+        Avoids ``--output-format=stream-json`` which requires ``--verbose``
+        and adds ~15s of overhead.  Uses ``communicate(timeout=...)`` so a
+        cleanup hang is bounded by the timeout rather than blocking forever.
         """
+        _CLI_TOTAL_TIMEOUT = _CLI_STARTUP_TIMEOUT + _CLI_RESULT_TIMEOUT
         proc = subprocess.Popen(
             [
                 self._cli_path,
@@ -294,9 +295,8 @@ class ComplexityRouter:
                 "--dangerously-skip-permissions",
                 f"--system-prompt={_ROUTER_SYSTEM_PROMPT}",
                 f"--model={ROUTER_MODELS['cli']}",
-                "--output-format=stream-json",
-                "--verbose",
                 "--max-turns=1",
+                "--tools", "",
                 "--strict-mcp-config",
                 "--no-chrome",
                 "--no-session-persistence",
@@ -306,70 +306,30 @@ class ComplexityRouter:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env={**os.environ},
         )
 
         try:
-            return self._read_cli_stream(proc)
-        finally:
+            stdout, stderr = proc.communicate(timeout=_CLI_TOTAL_TIMEOUT)
+        except subprocess.TimeoutExpired:
             proc.kill()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
+            stdout, stderr = proc.communicate(timeout=2)
+            if stdout and stdout.strip():
+                try:
+                    return _parse_routing_json(stdout.strip())
+                except Exception:
+                    pass
+            raise TimeoutError(f"CLI did not respond within {_CLI_TOTAL_TIMEOUT}s")
 
-    def _read_cli_stream(self, proc: subprocess.Popen) -> RoutingResult:
-        """Read stream-json events from the CLI, extract the assistant message.
+        if proc.returncode != 0:
+            detail = f": {stderr.strip()[:200]}" if stderr else ""
+            raise RuntimeError(f"CLI exited with code {proc.returncode}{detail}")
 
-        Uses a two-phase timeout so the CLI's cold-boot time (Node.js +
-        auth + MCP init) doesn't eat into the window for the actual LLM
-        response:
-          Phase 1: up to ``_CLI_STARTUP_TIMEOUT`` for the first event.
-          Phase 2: up to ``_CLI_RESULT_TIMEOUT`` after the first event.
-        """
-        t0 = time.monotonic()
-        first_event_at: Optional[float] = None
-        assistant_text = ""
+        text = stdout.strip()
+        if not text:
+            detail = f" (stderr: {stderr.strip()[:200]})" if stderr else ""
+            raise RuntimeError(f"CLI returned empty output{detail}")
 
-        for line in proc.stdout:
-            now = time.monotonic()
-
-            if first_event_at is None:
-                if now - t0 > _CLI_STARTUP_TIMEOUT:
-                    raise TimeoutError(
-                        f"CLI produced no events within {_CLI_STARTUP_TIMEOUT}s"
-                    )
-                first_event_at = now
-            else:
-                if now - first_event_at > _CLI_RESULT_TIMEOUT:
-                    raise TimeoutError(
-                        f"CLI stream exceeded {_CLI_RESULT_TIMEOUT}s after first event"
-                    )
-
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                evt = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            etype = evt.get("type", "")
-
-            if etype == "assistant":
-                msg = evt.get("message", {})
-                for block in msg.get("content", []):
-                    if block.get("type") == "text":
-                        assistant_text = block.get("text", "")
-
-            if etype == "result":
-                result_text = evt.get("result", assistant_text)
-                if not result_text:
-                    raise RuntimeError("CLI stream completed with no text")
-                return _parse_routing_json(result_text)
-
-        raise RuntimeError("CLI stream ended without a result event")
+        return _parse_routing_json(text)
 
     # ------------------------------------------------------------------
     # Keyword heuristic fallback

@@ -40,25 +40,15 @@ def _mock_openai_response(strategy: str, reason: str, roles: Any = None) -> Magi
     return response
 
 
-def _mock_cli_stream(strategy: str, reason: str, roles: Any = None) -> MagicMock:
-    """Build a mock Popen whose stdout yields stream-json events."""
-    import io
-
+def _mock_cli_proc(strategy: str, reason: str, roles: Any = None, returncode: int = 0) -> MagicMock:
+    """Build a mock Popen whose communicate() returns a JSON routing response."""
     payload = {"strategy": strategy, "reason": reason, "suggested_roles": roles}
     text = json.dumps(payload)
 
-    assistant_event = json.dumps({
-        "type": "assistant",
-        "message": {"content": [{"type": "text", "text": text}]},
-    })
-    result_event = json.dumps({"type": "result", "result": text})
-    stream = io.StringIO(f"{assistant_event}\n{result_event}\n")
-
     proc = MagicMock()
-    proc.stdout = stream
-    proc.stderr = io.StringIO("")
-    proc.kill = MagicMock()
-    proc.wait = MagicMock()
+    proc.communicate.return_value = (text, "")
+    proc.returncode = returncode
+    proc.poll.return_value = returncode
     return proc
 
 
@@ -90,7 +80,7 @@ def _make_router(**overrides: Any) -> ComplexityRouter:
 
 
 class TestCLIRouting:
-    """Tests the Claude Code CLI path (uses Popen with stream-json)."""
+    """Tests the Claude Code CLI path (uses Popen with communicate)."""
 
     def test_cli_routes_small_team(self) -> None:
         with patch("chai.core.router.get_config", return_value=_mock_config()), \
@@ -98,7 +88,7 @@ class TestCLIRouting:
              patch("subprocess.run"), \
              patch("subprocess.Popen") as mock_popen:
             router = ComplexityRouter()
-            mock_popen.return_value = _mock_cli_stream(
+            mock_popen.return_value = _mock_cli_proc(
                 "small_team", "Moderate task", ["backend", "qa"]
             )
             result = router.classify("add a search endpoint with tests")
@@ -114,36 +104,37 @@ class TestCLIRouting:
              patch("subprocess.run"), \
              patch("subprocess.Popen") as mock_popen:
             router = ComplexityRouter()
-            mock_popen.return_value = _mock_cli_stream("direct", "Simple fix")
+            mock_popen.return_value = _mock_cli_proc("direct", "Simple fix")
             router.classify("fix a typo")
 
         args = mock_popen.call_args[0][0]
         assert any("haiku" in str(a) for a in args)
 
-    def test_cli_uses_stream_json(self) -> None:
+    def test_cli_uses_plain_text_not_stream_json(self) -> None:
         with patch("chai.core.router.get_config", return_value=_mock_config()), \
              patch("shutil.which", return_value="/usr/local/bin/claude"), \
              patch("subprocess.run"), \
              patch("subprocess.Popen") as mock_popen:
             router = ComplexityRouter()
-            mock_popen.return_value = _mock_cli_stream("direct", "Simple")
+            mock_popen.return_value = _mock_cli_proc("direct", "Simple")
             router.classify("test")
 
         args = mock_popen.call_args[0][0]
-        assert "--output-format=stream-json" in args
-        assert "--verbose" in args
+        assert "--output-format=stream-json" not in args
+        assert "--verbose" not in args
 
-    def test_cli_kills_process_after_result(self) -> None:
+    def test_cli_error_includes_stderr(self) -> None:
+        proc = _mock_cli_proc("direct", "Simple")
+        proc.returncode = 1
+        proc.communicate.return_value = ("", "Something went wrong")
+
         with patch("chai.core.router.get_config", return_value=_mock_config()), \
              patch("shutil.which", return_value="/usr/local/bin/claude"), \
              patch("subprocess.run"), \
-             patch("subprocess.Popen") as mock_popen:
+             patch("subprocess.Popen", return_value=proc):
             router = ComplexityRouter()
-            mock_proc = _mock_cli_stream("direct", "Simple")
-            mock_popen.return_value = mock_proc
-            router.classify("test")
-
-        mock_proc.kill.assert_called()
+            with pytest.raises(RuntimeError, match="Something went wrong"):
+                router._classify_cli("test")
 
     def test_cli_warm_up_runs_on_init(self) -> None:
         with patch("chai.core.router.get_config", return_value=_mock_config()), \
