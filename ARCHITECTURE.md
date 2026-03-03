@@ -6,8 +6,9 @@ ch.ai is an AI engineering team harness that orchestrates specialized agents wit
 
 ### Core
 
-- **Harness**: Top-level runtime. Loads config, creates teams, runs prompts.
-- **Team**: Group of role-specialized agents. Coordinates task decomposition and execution.
+- **Harness**: Top-level runtime. Loads config, routes prompts, creates teams with dynamically selected roles.
+- **ComplexityRouter**: Classifies prompt complexity (direct / small_team / full_pipeline) and determines which roles to spin up via `suggested_roles`.
+- **Team**: Group of role-specialized agents. Coordinates task decomposition and execution. Receives a filtered roster from the Harness based on what the router suggested.
 - **AgentRunner**: Wraps Provider + ToolRegistry for a role. Runs task execution loops.
 - **TaskGraph**: DAG of TaskSpec with dependency tracking.
 - **RoleRegistry**: Role definitions (Lead, Frontend, Backend, QA, etc.) with prompts and tool access.
@@ -50,7 +51,7 @@ ch.ai is an AI engineering team harness that orchestrates specialized agents wit
 
 ## Data Flow
 
-1. User prompt → Harness → Team
+1. User prompt → Harness → ComplexityRouter (classify + select roles) → Team (filtered roster)
 2. Team Lead decomposes → TaskGraph
 3. TeamCoordinator + TaskScheduler dispatch ready tasks
 4. AgentRunners execute in worktrees (optional)

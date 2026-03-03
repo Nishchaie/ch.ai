@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Generator, Optional
 from ..config import ProjectConfig, get_config
 from ..providers.base import Provider
 from ..types import AgentConfig, AgentEvent, AutonomyLevel, ClarifyCallback, ProviderType, RoleType, TeamConfig, TeamRunResult, default_clarify
-from .router import ComplexityRouter, ExecutionStrategy
+from .router import ComplexityRouter, ExecutionStrategy, RoutingResult
 from .team import Team
 
 logger = logging.getLogger(__name__)
@@ -86,22 +86,36 @@ class Harness:
           DIRECT       -> single agent, no decomposition
           SMALL_TEAM   -> team decomposition, shared workspace
           FULL_PIPELINE -> team decomposition with worktrees + merge
-        """
-        team = self.create_team(team_config)
-        team._cancel_event = cancel_event or threading.Event()
 
+        When no explicit team_config or project-level team is set, the
+        router's suggested_roles are used to build a filtered team with
+        only the roles the task actually needs.
+        """
         if strategy_override:
             strategy = strategy_override
             reason = "strategy provided by caller"
+            routing = None
         else:
             routing = self._router.classify(prompt)
             strategy = routing.strategy
             reason = routing.reason
+
+        if team_config or self._project_config.team:
+            team = self.create_team(team_config)
+        else:
+            filtered_config = self._build_filtered_team_config(routing)
+            team = self.create_team(filtered_config)
+        team._cancel_event = cancel_event or threading.Event()
+
         logger.info("Routing: %s (%s)", strategy.value, reason)
 
         yield AgentEvent(
             type="info",
-            data={"routing": strategy.value, "reason": reason},
+            data={
+                "routing": strategy.value,
+                "reason": reason,
+                "roles": [r.value for r in team.get_members().keys()],
+            },
         )
 
         if strategy == ExecutionStrategy.DIRECT:
@@ -162,6 +176,41 @@ class Harness:
             max_concurrent_agents=self._config.max_concurrent_agents,
             default_provider=ProviderType(self._config.default_provider),
             default_model=self._config.default_model,
+        )
+
+    def _build_filtered_team_config(self, routing: Optional[RoutingResult]) -> TeamConfig:
+        """Build a TeamConfig containing only the roles the router suggested.
+
+        Falls back to the full default config when routing is None or
+        suggested_roles is empty/unparseable.
+        """
+        full = self.get_default_team_config()
+        if routing is None or not routing.suggested_roles:
+            return full
+
+        role_set: set[RoleType] = set()
+        for name in routing.suggested_roles:
+            try:
+                role_set.add(RoleType(name))
+            except ValueError:
+                logger.warning("Router suggested unknown role %r, ignoring", name)
+
+        if routing.strategy != ExecutionStrategy.DIRECT:
+            role_set.add(RoleType.LEAD)
+
+        filtered_members = {
+            role: cfg for role, cfg in full.members.items()
+            if role in role_set
+        }
+        if not filtered_members:
+            return full
+
+        return TeamConfig(
+            name="dynamic",
+            members=filtered_members,
+            max_concurrent_agents=full.max_concurrent_agents,
+            default_provider=full.default_provider,
+            default_model=full.default_model,
         )
 
     def status(self) -> Dict[str, Any]:

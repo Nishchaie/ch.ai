@@ -28,8 +28,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
 
 ## Key Concepts
 
-- **Harness**: The runtime that boots teams and manages agent lifecycles
-- **Team**: A group of role-specialized agents coordinated by a Team Lead
+- **Harness**: The runtime that routes prompts through the ComplexityRouter, dynamically selects which roles are needed, boots a filtered team, and manages agent lifecycles
+- **ComplexityRouter**: Classifies prompt complexity and suggests which roles to spin up (`suggested_roles`). Uses LLM-based classification with keyword heuristic fallback
+- **Team**: A group of role-specialized agents coordinated by a Team Lead. Receives a dynamically filtered roster from the Harness (or a fixed roster from `chai.yaml`)
 - **Role**: Defines allowed tools, autonomy level, context scope, system prompt
 - **TaskGraph**: DAG of tasks with dependencies, topologically sorted for parallel dispatch
 - **ValidationGate**: Automated test/lint/boot validation between execution and review

@@ -1348,3 +1348,218 @@ class TestInteractiveSimulation:
         assert len(session_context) == 2
         assert session_context[0]["prompt"] == p1
         assert session_context[1]["prompt"] == p2
+
+
+# ===================================================================
+# TEST: Dynamic Role Selection
+# ===================================================================
+
+class TestDynamicRoleSelection:
+    """Verify that the router's suggested_roles are used to build a
+    filtered team when no explicit team_config or project-level team is set."""
+
+    def _make_harness(self, project: Path, provider: SimulationProvider) -> Harness:
+        return Harness(
+            project_dir=str(project),
+            provider_factory=lambda p, m=None: provider,
+        )
+
+    def _consume(self, gen: Generator) -> tuple[list[AgentEvent], Optional[TeamRunResult]]:
+        events: list[AgentEvent] = []
+        result = None
+        try:
+            while True:
+                events.append(next(gen))
+        except StopIteration as e:
+            result = e.value
+        return events, result
+
+    # -- _build_filtered_team_config unit tests ----------------------------
+
+    def test_filtered_config_uses_suggested_roles(self) -> None:
+        from chai.core.router import RoutingResult
+        provider = SimulationProvider()
+        harness = Harness(provider_factory=lambda p, m=None: provider)
+
+        routing = RoutingResult(
+            strategy=ExecutionStrategy.SMALL_TEAM,
+            reason="test",
+            suggested_roles=["lead", "frontend", "qa"],
+        )
+        config = harness._build_filtered_team_config(routing)
+        roles = set(config.members.keys())
+        assert roles == {RoleType.LEAD, RoleType.FRONTEND, RoleType.QA}
+
+    def test_filtered_config_always_includes_lead_for_team(self) -> None:
+        from chai.core.router import RoutingResult
+        provider = SimulationProvider()
+        harness = Harness(provider_factory=lambda p, m=None: provider)
+
+        routing = RoutingResult(
+            strategy=ExecutionStrategy.SMALL_TEAM,
+            reason="test",
+            suggested_roles=["frontend", "backend"],
+        )
+        config = harness._build_filtered_team_config(routing)
+        assert RoleType.LEAD in config.members
+
+    def test_filtered_config_falls_back_when_no_roles(self) -> None:
+        from chai.core.router import RoutingResult
+        provider = SimulationProvider()
+        harness = Harness(provider_factory=lambda p, m=None: provider)
+
+        routing = RoutingResult(
+            strategy=ExecutionStrategy.SMALL_TEAM,
+            reason="test",
+            suggested_roles=None,
+        )
+        config = harness._build_filtered_team_config(routing)
+        assert len(config.members) == 7, "Should fall back to full default team"
+
+    def test_filtered_config_falls_back_on_none_routing(self) -> None:
+        provider = SimulationProvider()
+        harness = Harness(provider_factory=lambda p, m=None: provider)
+
+        config = harness._build_filtered_team_config(None)
+        assert len(config.members) == 7
+
+    def test_filtered_config_ignores_unknown_roles(self) -> None:
+        from chai.core.router import RoutingResult
+        provider = SimulationProvider()
+        harness = Harness(provider_factory=lambda p, m=None: provider)
+
+        routing = RoutingResult(
+            strategy=ExecutionStrategy.SMALL_TEAM,
+            reason="test",
+            suggested_roles=["lead", "backend", "doesnotexist"],
+        )
+        config = harness._build_filtered_team_config(routing)
+        assert RoleType.LEAD in config.members
+        assert RoleType.BACKEND in config.members
+        assert len(config.members) == 2
+
+    # -- run() wiring: info event includes roles ---------------------------
+
+    def test_info_event_includes_roles(self, sim_project: Path) -> None:
+        """The info event emitted by run() should list the active roles."""
+        provider = SimulationProvider(manages_tools=True)
+        harness = Harness(
+            project_dir=str(sim_project),
+            provider_factory=lambda p, m=None: provider,
+        )
+        events, _ = self._consume(harness.run(SAAS_PROMPT))
+
+        info_events = [e for e in events if e.type == "info" and isinstance(e.data, dict) and "routing" in e.data]
+        assert len(info_events) >= 1
+        assert "roles" in info_events[0].data
+        assert isinstance(info_events[0].data["roles"], list)
+        assert len(info_events[0].data["roles"]) > 0
+
+    # -- Explicit team_config overrides dynamic selection -------------------
+
+    def test_explicit_config_overrides_dynamic(self) -> None:
+        """When team_config is passed to run(), it should be used as-is."""
+        from chai.core.router import RoutingResult
+        provider = SimulationProvider(manages_tools=True)
+        harness = Harness(provider_factory=lambda p, m=None: provider)
+
+        explicit = TeamConfig(
+            name="explicit",
+            members={
+                RoleType.LEAD: AgentConfig(role=RoleType.LEAD, provider=ProviderType.CLAUDE_CODE, autonomy_level=AutonomyLevel.HIGH),
+                RoleType.BACKEND: AgentConfig(role=RoleType.BACKEND, provider=ProviderType.CLAUDE_CODE),
+            },
+            max_concurrent_agents=2,
+        )
+        events, result = self._consume(
+            harness.run("Fix a typo", team_config=explicit, strategy_override=ExecutionStrategy.DIRECT)
+        )
+        info_events = [e for e in events if e.type == "info" and isinstance(e.data, dict) and "roles" in e.data]
+        assert len(info_events) >= 1
+        role_set = set(info_events[0].data["roles"])
+        assert role_set == {"lead", "backend"}
+
+    # -- Project config (chai.yaml) overrides dynamic selection -------------
+
+    def test_project_config_overrides_dynamic(self, sim_project: Path) -> None:
+        """When chai.yaml defines a team, it should be used instead of dynamic selection."""
+        provider = SimulationProvider(manages_tools=True)
+        harness = Harness(
+            project_dir=str(sim_project),
+            provider_factory=lambda p, m=None: provider,
+        )
+        events, _ = self._consume(
+            harness.run("Fix a typo", strategy_override=ExecutionStrategy.DIRECT)
+        )
+        info_events = [e for e in events if e.type == "info" and isinstance(e.data, dict) and "roles" in e.data]
+        assert len(info_events) >= 1
+        role_set = set(info_events[0].data["roles"])
+        assert len(role_set) == 7, "chai.yaml has all 7 roles, should use them"
+
+    # -- DIRECT strategy still works correctly -----------------------------
+
+    def test_direct_strategy_uses_single_agent(self) -> None:
+        provider = SimulationProvider(manages_tools=True)
+        harness = Harness(provider_factory=lambda p, m=None: provider)
+
+        events, result = self._consume(
+            harness.run("Fix the typo in README", strategy_override=ExecutionStrategy.DIRECT)
+        )
+        assert result is not None
+        assert len(result.tasks) == 1
+
+
+# ===================================================================
+# TEST: Router Fallback Role Inference
+# ===================================================================
+
+class TestRouterFallbackRoleInference:
+    """Verify that _classify_fallback infers roles from prompt keywords."""
+
+    def _fallback(self, prompt: str):
+        router = ComplexityRouter.__new__(ComplexityRouter)
+        router._classifiers = []
+        router._provider = "claude_code"
+        router._anthropic_client = None
+        router._openai_client = None
+        router._cli_path = None
+        return router._classify_fallback(prompt)
+
+    def test_frontend_keywords_suggest_frontend(self) -> None:
+        result = self._fallback("Build a React dashboard with a sidebar component")
+        assert "frontend" in result.suggested_roles
+
+    def test_backend_keywords_suggest_backend(self) -> None:
+        result = self._fallback("Create an API endpoint for user authentication")
+        assert "backend" in result.suggested_roles
+
+    def test_qa_keywords_suggest_qa(self) -> None:
+        result = self._fallback("Write integration tests for the billing module")
+        assert "qa" in result.suggested_roles
+
+    def test_deployment_keywords_suggest_deployment(self) -> None:
+        result = self._fallback("Set up Docker and CI pipeline for the project")
+        assert "deployment" in result.suggested_roles
+
+    def test_prompt_keywords_suggest_prompt(self) -> None:
+        result = self._fallback("Build a prompt engineering tool for LLM chains")
+        assert "prompt" in result.suggested_roles
+
+    def test_researcher_keywords_suggest_researcher(self) -> None:
+        result = self._fallback("Build a report that will research and compare alternative database options for our platform")
+        assert "researcher" in result.suggested_roles
+
+    def test_lead_always_present_for_team(self) -> None:
+        result = self._fallback("Build a React component with tests")
+        assert result.strategy in (ExecutionStrategy.SMALL_TEAM, ExecutionStrategy.FULL_PIPELINE)
+        assert "lead" in result.suggested_roles
+
+    def test_mixed_keywords_suggest_multiple_roles(self) -> None:
+        result = self._fallback("Build an API with React frontend and Docker deployment")
+        assert "backend" in result.suggested_roles
+        assert "frontend" in result.suggested_roles
+        assert "deployment" in result.suggested_roles
+
+    def test_no_keywords_defaults_to_backend(self) -> None:
+        result = self._fallback("Build a new feature for the codebase")
+        assert "backend" in result.suggested_roles

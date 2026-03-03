@@ -9,7 +9,7 @@ AI engineering team harness — orchestrate specialized agents with roles, feedb
 
 ch.ai is an AI engineering team harness that runs multiple specialized agents in coordinated roles. Instead of a single generalist model, you get a Team Lead that decomposes tasks, Backend and Frontend specialists that implement code, QA that validates, and more. Each agent has access to the right tools and context for its role.
 
-ch.ai makes the "engineering team" metaphor concrete: a Team Lead decomposes your prompt into a task graph (DAG), agents execute tasks in parallel respecting dependencies, and a validation gate runs tests and lint between execution and review. Golden principles in `docs/golden-principles/` enforce code standards mechanically.
+ch.ai makes the "engineering team" metaphor concrete: a complexity router analyzes each prompt and dynamically selects only the roles the task actually needs -- a simple bug fix gets a single backend agent, a feature touching UI and API gets frontend + backend + QA, and a full platform build spins up the entire roster. The Team Lead decomposes your prompt into a task graph (DAG), agents execute tasks in parallel respecting dependencies, and a validation gate runs tests and lint between execution and review. Golden principles in `docs/golden-principles/` enforce code standards mechanically.
 
 What's different: ch.ai is a harness you run locally or in CI. You configure which providers (Claude Code CLI, Codex CLI, Anthropic API, OpenAI API, or any OpenAI-compatible endpoint) power each role. Plans are first-class artifacts in `docs/exec-plans/`. The system improves itself by tracking quality scores and updating principles after runs.
 
@@ -101,7 +101,7 @@ python -m pytest     # Should pass all tests (from the ch.ai repo)
 ## Architecture
 
 ```
-User → CLI → Harness → Team Lead → TaskGraph → Roles → Providers → Tools
+User → CLI → Harness → Router (select roles) → Team (filtered) → Team Lead → TaskGraph → Agents → Providers → Tools
 ```
 
 See `docs/architecture-diagram.md` for full Mermaid diagrams exportable to SVG.
@@ -110,7 +110,9 @@ See `docs/architecture-diagram.md` for full Mermaid diagrams exportable to SVG.
 flowchart TB
     User([User]) --> CLI[CLI / Web UI]
     CLI --> Harness[Harness]
-    Harness --> Lead[Team Lead]
+    Harness --> Router[ComplexityRouter]
+    Router -->|"suggested_roles"| DynTeam["Team (dynamic roster)"]
+    DynTeam --> Lead[Team Lead]
     Lead --> TaskGraph[TaskGraph DAG]
     TaskGraph --> FE[Frontend]
     TaskGraph --> BE[Backend]
@@ -142,6 +144,8 @@ flowchart TB
 | Researcher | Search, docs review, tradeoff analysis | Medium | Read-only + search | `*.md`, `docs/`, `references/` |
 | QA | Tests, lint, validation, bug reproduction | Medium | Read, write, edit, shell, browser, review | `test*.py`, `*_test.*`, `tests/`, `*.py` |
 | Deployment | CI/CD, Docker, deployment scripts, monitoring | Medium | All | `Dockerfile*`, `.github/`, `Makefile`, `pyproject.toml` |
+
+Roles are **dynamically selected** per prompt. The complexity router analyzes your task and spins up only the roles it needs (e.g. a backend API change gets `lead` + `backend` + `qa`). To lock in a fixed roster, define `team.members` in `chai.yaml`.
 
 Roles are extensible via `RoleRegistry`. Add custom roles like `SecurityEngineer`, `DataEngineer`, or `MLEngineer` with their own tool access, system prompt, and autonomy level.
 
@@ -190,13 +194,15 @@ Session context threads across prompts: after each run, a summary of what was do
 
 ### chai.yaml (per-project)
 
+The `team.members` section is optional. When omitted, roles are selected dynamically per prompt based on the router's analysis. Define `members` to lock in a fixed roster:
+
 ```yaml
 team:
   name: my-project-team
   max_concurrent_agents: 4
   default_provider: claude_code
   workspace_mode: worktree             # "worktree" or "shared"
-  members:
+  members:                             # omit to enable dynamic role selection
     lead:
       provider: claude_code
       autonomy: high
@@ -420,6 +426,7 @@ Open http://localhost:5173 to see the kanban task board, live agent output, plan
 ### Tips for complex projects
 
 - **Start with `chai run` for features, `chai agent` for fixes.** Team mode shines for multi-file, multi-concern work. Single-agent mode is faster for focused changes.
+- **Let the router pick your team.** By default, ch.ai analyzes each prompt and spins up only the roles it needs. Override with `team.members` in `chai.yaml` if you want a fixed roster.
 - **Write golden principles early.** Add rules to `docs/golden-principles/index.md` about your project's patterns (API response format, component structure, error handling). The agents will follow them mechanically.
 - **Use the Researcher role before big decisions.** Have it analyze tradeoffs and write findings to `docs/references/` before committing to an approach.
 - **Let QA run continuously.** Keep `validation.run_tests: true` so every change is tested before review. The self-fix loop catches most issues automatically.

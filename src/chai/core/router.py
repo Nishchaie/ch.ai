@@ -414,23 +414,71 @@ class ComplexityRouter:
                 strategy=ExecutionStrategy.DIRECT,
                 reason="Short prompt without build intent (fallback)",
             )
+
+        roles = self._infer_roles_from_keywords(lower, word_set)
+
         if has_build and (has_scale or domain_count >= 2 or is_long_build or feature_count >= 3):
             return RoutingResult(
                 strategy=ExecutionStrategy.FULL_PIPELINE,
                 reason="Build-at-scale detected (fallback)",
-                suggested_roles=["lead", "frontend", "backend", "qa"],
+                suggested_roles=roles,
             )
         if has_build:
             return RoutingResult(
                 strategy=ExecutionStrategy.SMALL_TEAM,
                 reason="Build-intent detected (fallback)",
-                suggested_roles=["lead", "frontend"],
+                suggested_roles=roles,
             )
         return RoutingResult(
             strategy=ExecutionStrategy.SMALL_TEAM,
             reason="Non-trivial prompt (fallback)",
-            suggested_roles=["lead", "frontend"],
+            suggested_roles=roles,
         )
+
+    @staticmethod
+    def _infer_roles_from_keywords(lower: str, word_set: set[str]) -> List[str]:
+        """Scan prompt keywords to decide which specialist roles are needed."""
+        _ROLE_KEYWORDS = {
+            "frontend": {
+                "component", "css", "tsx", "jsx", "react", "ui", "frontend",
+                "page", "layout", "style", "html", "tailwind", "vue", "svelte",
+                "next", "vite", "sidebar", "navbar", "modal", "button", "form",
+            },
+            "backend": {
+                "api", "endpoint", "server", "database", "sql", "model",
+                "migration", "backend", "fastapi", "django", "flask", "express",
+                "graphql", "rest", "schema", "orm", "auth", "authentication",
+                "middleware", "route", "handler",
+            },
+            "qa": {
+                "test", "tests", "testing", "spec", "assert", "coverage",
+                "e2e", "integration", "unit", "pytest", "jest", "cypress",
+                "playwright", "fixture", "mock",
+            },
+            "deployment": {
+                "deploy", "docker", "ci", "cd", "pipeline", "infra",
+                "kubernetes", "k8s", "terraform", "aws", "gcp", "azure",
+                "nginx", "dockerfile", "compose", "helm", "monitoring",
+            },
+            "prompt": {
+                "prompt", "llm", "gpt", "claude", "embedding", "token",
+                "fine-tune", "finetune", "rag", "vector", "chain",
+            },
+            "researcher": {
+                "research", "compare", "evaluate", "tradeoff", "analysis",
+                "survey", "benchmark", "alternative", "pros", "cons",
+            },
+        }
+
+        roles: List[str] = ["lead"]
+        for role, keywords in _ROLE_KEYWORDS.items():
+            if keywords & word_set:
+                roles.append(role)
+
+        if len(roles) == 1:
+            roles.append("backend")
+
+        return roles
 
 
 def _short_error(exc: Exception) -> str:
