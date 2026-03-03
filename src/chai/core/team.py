@@ -97,6 +97,13 @@ class Team:
             "max_concurrent_agents": self._config.max_concurrent_agents,
         }
 
+    _README_INSTRUCTION = (
+        "\n\nAfter completing the main task, create or update a README.md at the "
+        "project root with: project overview, prerequisites, installation/setup "
+        "steps, how to run the project, environment variables (if any), and any "
+        "relevant configuration."
+    )
+
     def run_direct(self, prompt: str, role: Optional[RoleType] = None) -> Generator[AgentEvent, None, TeamRunResult]:
         """Fast path: skip decomposition, run a single agent immediately."""
         events: list[AgentEvent] = []
@@ -106,7 +113,7 @@ class Team:
         task = TaskSpec(
             id="direct-1",
             title=prompt,
-            description="",
+            description=self._README_INSTRUCTION,
             role=target_role,
         )
 

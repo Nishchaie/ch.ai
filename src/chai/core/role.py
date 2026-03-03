@@ -31,6 +31,10 @@ When given a task, analyze it and output a JSON object with this exact structure
 Roles: lead, frontend, backend, prompt, researcher, qa, deployment.
 - Use depends_on to express dependencies (e.g. qa depends on backend).
 - Each task id must be unique (e.g. be-api, fe-ui, qa-e2e).
+- ALWAYS include a final task (id: "docs-readme") assigned to the "deployment" role that creates \
+or updates README.md at the project root. The README must cover: project overview, prerequisites, \
+installation/setup steps, how to run the project, environment variables, and any relevant configuration. \
+This task should depend on all other implementation tasks so it can accurately document the final state.
 - Output ONLY valid JSON, no markdown or extra text."""
 
 

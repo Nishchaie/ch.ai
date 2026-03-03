@@ -138,7 +138,12 @@ class TaskDecomposer:
                 f"\n\nIMPORTANT: Only assign tasks to these available roles: "
                 f"{', '.join(role_names)}. Do NOT use any other roles."
             )
-        full_prompt = f"Decompose this request into a task graph:\n\n{prompt}{roles_constraint}"
+        readme_reminder = (
+            "\n\nREMINDER: Include a final 'docs-readme' task that creates/updates "
+            "README.md with setup and run instructions. It should depend on all "
+            "implementation tasks."
+        )
+        full_prompt = f"Decompose this request into a task graph:\n\n{prompt}{roles_constraint}{readme_reminder}"
 
         messages: List[Dict[str, Any]] = [
             {"role": "user", "content": full_prompt},
@@ -177,8 +182,11 @@ class TaskDecomposer:
             ))
             return graph
 
+        has_readme_task = False
+        all_task_ids: list[str] = []
         for t in parsed["tasks"]:
             task_id = str(t.get("id", f"task-{len(graph.all_tasks()) + 1}"))
+            all_task_ids.append(task_id)
             role_str = str(t.get("role", "backend")).lower()
             try:
                 role = RoleType(role_str)
@@ -193,14 +201,40 @@ class TaskDecomposer:
                 )
                 role = fallback
             depends_on = t.get("depends_on") or t.get("dependencies") or []
+            title = str(t.get("title", task_id))
+            if "readme" in task_id.lower() or "readme" in title.lower():
+                has_readme_task = True
             graph.add_task(TaskSpec(
                 id=task_id,
-                title=str(t.get("title", task_id)),
+                title=title,
                 description=str(t.get("description", "")),
                 role=role,
                 dependencies=list(depends_on),
                 acceptance_criteria=list(t.get("acceptance_criteria") or []),
             ))
+
+        if not has_readme_task:
+            readme_role = RoleType.DEPLOYMENT
+            if available_roles and readme_role not in available_roles:
+                readme_role = RoleType.BACKEND if RoleType.BACKEND in available_roles else available_roles[0]
+            graph.add_task(TaskSpec(
+                id="docs-readme",
+                title="Create/update README.md with setup and run instructions",
+                description=(
+                    "Create or update README.md at the project root. Include: "
+                    "project overview, prerequisites, installation/setup steps, "
+                    "how to run the project, environment variables, and any "
+                    "relevant configuration."
+                ),
+                role=readme_role,
+                dependencies=all_task_ids,
+                acceptance_criteria=[
+                    "README.md exists at project root",
+                    "Contains installation/setup instructions",
+                    "Contains instructions to run the project",
+                ],
+            ))
+
         return graph
 
     def _parse_json_output(self, text: str) -> Optional[Dict[str, Any]]:
